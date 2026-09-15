@@ -1,0 +1,35 @@
+# --- Legacy originals: third-party, closed source, NOT redistributable -------
+# The wSSH installer and anything extracted from it (the BSD glue sources, the
+# commercial wodSSHD.dll, the shipped .exe/.dll files) stays local as a
+# compatibility oracle and reference only. Never tracked, never shipped.
+wSSH/
+
+# --- Build output ------------------------------------------------------------
+rssh
+rssh.exe
+*.o
+*.obj
+*.a
+*.exe
+*.pdb
+
+# --- Secrets and local deploy scaffolding ------------------------------------
+# Host keys, private keys and the credentials-bearing deploy scripts must never
+# enter the repository.
+deploy.sh
+*.local
+*.key
+*.pem
+
+# --- Python tooling ----------------------------------------------------------
+__pycache__/
+*.pyc
+
+# --- Editors / OS ------------------------------------------------------------
+*~
+*.swp
+.DS_Store
+
+# --- Scratch -----------------------------------------------------------------
+build/
+*.log
