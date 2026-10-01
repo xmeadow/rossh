@@ -33,7 +33,10 @@
 
 #ifdef _WIN32
     #include <windows.h>
-    #include <wincrypt.h>
+    /* Documented in ntsecapi.h as RtlGenRandom; declared here so the build does
+     * not depend on that header being present. */
+    BOOLEAN WINAPI SystemFunction036(PVOID RandomBuffer, ULONG RandomBufferLength);
+    #define RtlGenRandom SystemFunction036
 #else
     #include <unistd.h>
 #endif
@@ -76,17 +79,24 @@ static void mix(const void *data, size_t len)
 static size_t platform_entropy(byte *buf, size_t len)
 {
 #ifdef _WIN32
-    HCRYPTPROV prov;
-    BOOL       ok;
-
-    if (len > 0xffffu)
+    /* RtlGenRandom (advapi32's SystemFunction036) — deliberately *not*
+     * CryptAcquireContext.
+     *
+     * The CryptoAPI container machinery is the heavy, stateful path: on ReactOS
+     * it is a real candidate for blocking, and it buys nothing here. RtlGenRandom
+     * is a plain computation there (dll/win32/advapi32/misc/sysfunc.c), and on
+     * real Windows it is the very same generator that the CryptoAPI path ends in.
+     *
+     * To be accurate about the evidence: the on-target hang we chased turned out
+     * to sit *before* main, so this is a precaution, not a proven fix. It is kept
+     * because it is simpler and because the CryptoAPI path has no advantage here.
+     *
+     * The quality on ReactOS is poor — tick-count seeded, see docs/reactos.md —
+     * which is precisely why it is only ever one ingredient in the pool below and
+     * never the source of it. */
+    if (len > 0xffffffffu)
         return 0;
-    if (!CryptAcquireContext(&prov, NULL, NULL, PROV_RSA_FULL,
-                             CRYPT_VERIFYCONTEXT))
-        return 0;
-    ok = CryptGenRandom(prov, (DWORD)len, buf);
-    CryptReleaseContext(prov, 0);
-    return ok ? len : 0;
+    return RtlGenRandom(buf, (ULONG)len) ? len : 0;
 #else
     FILE  *f;
     size_t got;

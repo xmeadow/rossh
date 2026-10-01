@@ -23,6 +23,7 @@
 #ifdef _WIN32
     #include <winsock2.h>
     #include <ws2tcpip.h>
+    #include <io.h>
     typedef SOCKET socket_t;
     #define socklen_type int
     #define close_socket closesocket
@@ -226,21 +227,83 @@ static socket_t listen_on(const char *addr, int port)
     return fd;
 }
 
+/*
+ * A trace file, written and flushed at each stage.
+ *
+ * On the target this is the only channel that proved reliable: wSSH's exec
+ * forwards stdout and not stderr, buffering hides what does arrive, and a process
+ * that hangs before its first line is otherwise completely invisible. A file is
+ * independent of all of that.
+ */
+static FILE *g_trace = NULL;
+
+static void trace(const char *msg)
+{
+    if (g_trace == NULL)
+        return;
+    fprintf(g_trace, "%s\n", msg);
+    fflush(g_trace);
+}
+
+static void trace_open(const char *path)
+{
+    g_trace = fopen(path, "w");
+    if (g_trace == NULL)
+        fprintf(stderr, "rossh: cannot write trace file '%s'\n", path);
+    else
+        trace("trace open");
+}
+
 int main(int argc, char **argv)
 {
-    int          port;
+    int          port = DEFAULT_PORT;
     int          once = 0;                  /* --once: serve one connection, then exit */
-    const char  *key_path;
+    const char  *key_path = DEFAULT_KEY;
     const char  *bind_addr = "127.0.0.1";   /* loopback unless asked otherwise */
+    const char  *genkey_path = NULL;
+    const char  *port_arg = NULL;
+    const char  *key_arg  = NULL;
+    int          i;
     WOLFSSH_CTX *ctx;
     socket_t     lfd;
     int          rc;
 
-    /* Line-wise output. This process writes into pipes and log files, and a
-     * block-buffered stdout hides exactly the diagnostics you need when
-     * something does not come up. */
+    /* Line-wise output, and everything on one stream: wSSH's exec forwards
+     * stdout and not stderr, and an error nobody can see is worse than one on
+     * the wrong stream. Measured on the target — see docs/build.md. */
     setvbuf(stdout, NULL, _IONBF, 0);
+#ifdef _WIN32
+    _dup2(1, 2);
+#else
+    dup2(1, 2);
+#endif
     fprintf(stderr, "rossh: start\n");
+
+    /* Arguments first. Everything after this point can block, so a trace option
+     * — or a simple typo — has to be handled before any of it. */
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--genkey") == 0 && i + 1 < argc)
+            genkey_path = argv[++i];
+        else if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc)
+            bind_addr = argv[++i];
+        else if (strcmp(argv[i], "--trace") == 0 && i + 1 < argc)
+            trace_open(argv[++i]);
+        else if (strcmp(argv[i], "--once") == 0)
+            once = 1;
+        else if (port_arg == NULL)
+            port_arg = argv[i];
+        else if (key_arg == NULL)
+            key_arg = argv[i];
+        else {
+            fprintf(stderr, "rossh: unexpected argument '%s'\n", argv[i]);
+            return 1;
+        }
+    }
+    if (port_arg != NULL)
+        port = atoi(port_arg);
+    if (key_arg != NULL)
+        key_path = key_arg;
+    trace("args parsed");
 
 #ifdef _WIN32
     {
@@ -251,38 +314,20 @@ int main(int argc, char **argv)
         }
     }
 #endif
-
-    rng_start();
+    trace("winsock up");
 
 #ifdef DEBUG_WOLFSSH
     /* make deps EXTRA_CPPFLAGS=-DDEBUG_WOLFSSH && make DEBUG=1 */
     wolfSSH_Debugging_ON();
 #endif
 
-    /* Arguments: optional --genkey <file> and --bind <addr>, then [port] [key]. */
-    {
-        const char *port_arg = NULL;
-        const char *key_arg  = NULL;
-        int         i;
+    rng_start();
+    trace("rng done");
 
-        for (i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "--genkey") == 0 && i + 1 < argc)
-                return (generate_host_key(argv[++i]) == 0) ? 0 : 1;
-            else if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc)
-                bind_addr = argv[++i];
-            else if (strcmp(argv[i], "--once") == 0)
-                once = 1;
-            else if (port_arg == NULL)
-                port_arg = argv[i];
-            else if (key_arg == NULL)
-                key_arg = argv[i];
-            else {
-                fprintf(stderr, "rossh: unexpected argument '%s'\n", argv[i]);
-                return 1;
-            }
-        }
-        port     = (port_arg != NULL) ? atoi(port_arg) : DEFAULT_PORT;
-        key_path = (key_arg  != NULL) ? key_arg  : DEFAULT_KEY;
+    if (genkey_path != NULL) {
+        rc = generate_host_key(genkey_path);
+        trace(rc == 0 ? "genkey ok" : "genkey failed");
+        return (rc == 0) ? 0 : 1;
     }
 
     ctx = wolfSSH_CTX_new(WOLFSSH_ENDPOINT_SERVER, NULL);
@@ -307,6 +352,7 @@ int main(int argc, char **argv)
     if (load_host_key(ctx, key_path) != 0)
         return 1;
     printf("host key '%s' loaded\n", key_path);
+    trace("host key loaded");
 
     lfd = listen_on(bind_addr, port);
     if (lfd == INVALID_SOCKET) {
@@ -315,6 +361,7 @@ int main(int argc, char **argv)
     }
 
     printf("rossh listening on %s:%d\n", bind_addr, port);
+    trace("listening");
     printf("  kex      %s\n", algo_kex);
     printf("  host key %s\n", algo_hostkey);
     printf("  cipher   %s\n", algo_cipher);
@@ -348,6 +395,7 @@ int main(int argc, char **argv)
                 continue;
             }
             failures = 0;
+            trace("connection accepted");
 
             printf("--- connection from %s\n", inet_ntoa(peer.sin_addr));
             fflush(stdout);
@@ -373,6 +421,7 @@ int main(int argc, char **argv)
         }
     }
 
+    trace("exiting");
     close_socket(lfd);
     return 0;
 }
