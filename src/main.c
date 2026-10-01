@@ -168,11 +168,20 @@ done:
     return (derSz > 0) ? 0 : -1;
 }
 
-static socket_t listen_loopback(int port)
+static socket_t listen_on(const char *addr, int port)
 {
     socket_t           fd;
-    struct sockaddr_in addr;
+    struct sockaddr_in sa;
     int                one = 1;
+    unsigned long      ip;   /* in_addr_t is POSIX; winsock has no such name */
+
+    /* inet_addr, not inet_pton: the former has existed since forever and is
+     * what ReactOS is certain to have. */
+    ip = inet_addr(addr);
+    if (ip == INADDR_NONE) {
+        fprintf(stderr, "rossh: '%s' is not a valid bind address\n", addr);
+        return INVALID_SOCKET;
+    }
 
     fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd == INVALID_SOCKET)
@@ -180,12 +189,12 @@ static socket_t listen_loopback(int port)
 
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof one);
 
-    memset(&addr, 0, sizeof addr);
-    addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);   /* M1: no LAN exposure */
-    addr.sin_port        = htons((unsigned short)port);
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family      = AF_INET;
+    sa.sin_addr.s_addr = ip;
+    sa.sin_port        = htons((unsigned short)port);
 
-    if (bind(fd, (struct sockaddr *)&addr, sizeof addr) != 0 ||
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0 ||
         listen(fd, 8) != 0) {
         close_socket(fd);
         return INVALID_SOCKET;
@@ -197,9 +206,16 @@ int main(int argc, char **argv)
 {
     int          port;
     const char  *key_path;
+    const char  *bind_addr = "127.0.0.1";   /* loopback unless asked otherwise */
     WOLFSSH_CTX *ctx;
     socket_t     lfd;
     int          rc;
+
+    /* Line-wise output. This process writes into pipes and log files, and a
+     * block-buffered stdout hides exactly the diagnostics you need when
+     * something does not come up. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    fprintf(stderr, "rossh: start\n");
 
 #ifdef _WIN32
     {
@@ -218,12 +234,29 @@ int main(int argc, char **argv)
     wolfSSH_Debugging_ON();
 #endif
 
-    /* `rossh --genkey <file>`: write a host key and exit. */
-    if (argc == 3 && strcmp(argv[1], "--genkey") == 0)
-        return (generate_host_key(argv[2]) == 0) ? 0 : 1;
+    /* Arguments: optional --genkey <file> and --bind <addr>, then [port] [key]. */
+    {
+        const char *port_arg = NULL;
+        const char *key_arg  = NULL;
+        int         i;
 
-    port     = (argc > 1) ? atoi(argv[1]) : DEFAULT_PORT;
-    key_path = (argc > 2) ? argv[2] : DEFAULT_KEY;
+        for (i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--genkey") == 0 && i + 1 < argc)
+                return (generate_host_key(argv[++i]) == 0) ? 0 : 1;
+            else if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc)
+                bind_addr = argv[++i];
+            else if (port_arg == NULL)
+                port_arg = argv[i];
+            else if (key_arg == NULL)
+                key_arg = argv[i];
+            else {
+                fprintf(stderr, "rossh: unexpected argument '%s'\n", argv[i]);
+                return 1;
+            }
+        }
+        port     = (port_arg != NULL) ? atoi(port_arg) : DEFAULT_PORT;
+        key_path = (key_arg  != NULL) ? key_arg  : DEFAULT_KEY;
+    }
 
     ctx = wolfSSH_CTX_new(WOLFSSH_ENDPOINT_SERVER, NULL);
     if (ctx == NULL) {
@@ -246,14 +279,15 @@ int main(int argc, char **argv)
 
     if (load_host_key(ctx, key_path) != 0)
         return 1;
+    printf("host key '%s' loaded\n", key_path);
 
-    lfd = listen_loopback(port);
+    lfd = listen_on(bind_addr, port);
     if (lfd == INVALID_SOCKET) {
         perror("rossh: bind/listen");
         return 1;
     }
 
-    printf("rossh listening on 127.0.0.1:%d\n", port);
+    printf("rossh listening on %s:%d\n", bind_addr, port);
     printf("  kex      %s\n", algo_kex);
     printf("  host key %s\n", algo_hostkey);
     printf("  cipher   %s\n", algo_cipher);
