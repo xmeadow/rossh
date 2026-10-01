@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "rng.h"
 
@@ -27,6 +28,7 @@
     #define close_socket closesocket
 #else
     #include <arpa/inet.h>
+    #include <errno.h>
     #include <netinet/in.h>
     #include <sys/socket.h>
     #include <unistd.h>
@@ -168,6 +170,28 @@ done:
     return (derSz > 0) ? 0 : -1;
 }
 
+/* A short pause, and the platform's last socket error. */
+static void pause_ms(unsigned ms)
+{
+#ifdef _WIN32
+    Sleep(ms);
+#else
+    struct timespec ts;
+    ts.tv_sec  = (time_t)(ms / 1000);
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+#endif
+}
+
+static int last_socket_error(void)
+{
+#ifdef _WIN32
+    return (int)WSAGetLastError();
+#else
+    return errno;
+#endif
+}
+
 static socket_t listen_on(const char *addr, int port)
 {
     socket_t           fd;
@@ -205,6 +229,7 @@ static socket_t listen_on(const char *addr, int port)
 int main(int argc, char **argv)
 {
     int          port;
+    int          once = 0;                  /* --once: serve one connection, then exit */
     const char  *key_path;
     const char  *bind_addr = "127.0.0.1";   /* loopback unless asked otherwise */
     WOLFSSH_CTX *ctx;
@@ -245,6 +270,8 @@ int main(int argc, char **argv)
                 return (generate_host_key(argv[++i]) == 0) ? 0 : 1;
             else if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc)
                 bind_addr = argv[++i];
+            else if (strcmp(argv[i], "--once") == 0)
+                once = 1;
             else if (port_arg == NULL)
                 port_arg = argv[i];
             else if (key_arg == NULL)
@@ -294,31 +321,58 @@ int main(int argc, char **argv)
     printf("  mac      %s\n", algo_mac);
     fflush(stdout);
 
-    for (;;) {
-        struct sockaddr_in peer;
-        socklen_type       plen = sizeof peer;
-        socket_t           cfd;
-        WOLFSSH           *ssh;
+    {
+        unsigned failures = 0;
 
-        cfd = accept(lfd, (struct sockaddr *)&peer, &plen);
-        if (cfd == INVALID_SOCKET)
-            continue;
+        for (;;) {
+            struct sockaddr_in peer;
+            socklen_type       plen = sizeof peer;
+            socket_t           cfd;
+            WOLFSSH           *ssh;
 
-        printf("--- connection from %s\n", inet_ntoa(peer.sin_addr));
-        fflush(stdout);
+            cfd = accept(lfd, (struct sockaddr *)&peer, &plen);
+            if (cfd == INVALID_SOCKET) {
+                /* A server must never spin here. ReactOS is quite capable of
+                 * failing accept() persistently, and a busy loop takes the whole
+                 * VM down with it: the network stack stops answering, and there
+                 * is no out-of-band way back in. Pause, and give up after a run
+                 * of failures instead of burning the machine. */
+                if (++failures == 1)
+                    fprintf(stderr, "rossh: accept failed (%d), backing off\n",
+                            last_socket_error());
+                if (failures >= 30) {
+                    fprintf(stderr, "rossh: accept keeps failing, giving up\n");
+                    break;
+                }
+                pause_ms(200);
+                continue;
+            }
+            failures = 0;
 
-        ssh = wolfSSH_new(ctx);
-        if (ssh == NULL) {
+            printf("--- connection from %s\n", inet_ntoa(peer.sin_addr));
+            fflush(stdout);
+
+            ssh = wolfSSH_new(ctx);
+            if (ssh == NULL) {
+                close_socket(cfd);
+                if (once)
+                    break;
+                continue;
+            }
+
+            wolfSSH_set_fd(ssh, (WS_SOCKET_T)cfd);
+            rc = wolfSSH_accept(ssh);
+            printf("wolfSSH_accept -> %d\n", rc);
+            fflush(stdout);
+
+            wolfSSH_free(ssh);
             close_socket(cfd);
-            continue;
+
+            if (once)
+                break;
         }
-
-        wolfSSH_set_fd(ssh, (WS_SOCKET_T)cfd);
-        rc = wolfSSH_accept(ssh);
-        printf("wolfSSH_accept -> %d\n", rc);
-        fflush(stdout);
-
-        wolfSSH_free(ssh);
-        close_socket(cfd);
     }
+
+    close_socket(lfd);
+    return 0;
 }
