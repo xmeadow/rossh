@@ -26,11 +26,14 @@ Details and the raw measurements: [docs/wssh.md](docs/wssh.md).
 
 ## Status
 
-Specification stage; no application code yet. The design is pinned down in
-[spec.md](spec.md), the platform constraints it has to live with are in
-[docs/reactos.md](docs/reactos.md), and the toolchain is **already proven** — a
-cross-build spike produced a working 32-bit binary for ReactOS
-([docs/build.md](docs/build.md)).
+**M1 is done.** The server offers the modern suite of [spec.md](spec.md) §4.1 and
+a stock OpenSSH client negotiates `curve25519-sha256` / `ssh-ed25519` /
+`aes128-gcm@openssh.com` against it with **no `-o` flags at all**, reaching
+authentication and being refused there. Verified natively by
+`tools/m1-check.sh`, and `make win32` produces a 32-bit `rossh.exe` importing only
+`ADVAPI32`, `CRYPT32`, `KERNEL32`, `msvcrt` and `WS2_32` at subsystem 4.0 —
+no UCRT, no `vcruntime`, no `bcrypt`. Serving a session is M2; running it on the
+VM comes next.
 
 ## Layout
 
@@ -42,8 +45,13 @@ docs/
   alternatives.md        routes evaluated, and why this one was chosen
   build.md               the verified cross-build recipe, and its workarounds
 tools/
+  build-deps.sh          build the pinned wolfSSL/wolfSSH for one flavor
   probe/kexinit.py       read the peer's algorithm offer, unauthenticated
-src/                     (lands with M1)
+  m1-check.sh            M1 acceptance check: offer + flag-free authentication
+src/
+  main.c                 the server: listener, wolfSSH wiring, --genkey
+  rng.c, rng.h           the entropy pool
+Makefile                 make (native) · make win32 (ReactOS)
 third_party/             wolfSSL + wolfSSH, pinned submodules
 ```
 

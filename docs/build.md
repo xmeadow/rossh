@@ -1,7 +1,12 @@
 # Building for ReactOS
 
-A cross-compile from Linux with `i686-w64-mingw32`. **Verified working** — the
-recipe below was executed and produced a 32-bit `echoserver.exe`.
+A cross-compile from Linux with `i686-w64-mingw32`. **Verified working.**
+
+Two paths are described here. The scripted one — `tools/build-deps.sh`, which is
+what the Makefile drives — is what the project actually uses. The manual steps
+further down are the sequence the original spike was run with, and they document
+the same flags, so that a reader can see exactly what happens without reading
+shell.
 
 It is *not* a turnkey upstream path: wolfSSH's examples are POSIX-oriented and
 the library needs two small workarounds. This file records exactly what works
@@ -62,7 +67,8 @@ curl -O https://www.wolfssl.com/wolfssh-1.5.0.zip     #  1.2 MB
 cd third_party/wolfssl
 ./configure --host=i686-w64-mingw32 \
   --prefix=/tmp/rosssh-spike/prefix \
-  --enable-wolfssh --enable-curve25519 --enable-ed25519 --enable-aesgcm \
+  --enable-wolfssh --enable-curve25519 --enable-ed25519 --enable-ed25519-stream \
+  --enable-aesgcm \
   --enable-static --disable-shared \
   --disable-examples --disable-crypttests \
   --disable-mlkem --disable-pqc-hybrids
@@ -117,6 +123,28 @@ Building the target explicitly is the way through.
 5. **The client examples are POSIX-only.** `examples/client` needs `pthread`,
    `ioctl`, `TIOCGWINSZ`, `SIGWINCH`; `examples/scpclient` needs `termios.h`.
    Neither is portable to mingw. `examples/echoserver` builds fine.
+6. **Ed25519 needs `--enable-ed25519-stream`, and that is not optional.**
+   `wolfssh/internal.h` compiles Ed25519 out entirely unless wolfSSL defines all
+   four of `HAVE_ED25519`, `WOLFSSL_ED25519_STREAMING_VERIFY`,
+   `HAVE_ED25519_KEY_IMPORT` and `HAVE_ED25519_KEY_EXPORT`. `--enable-ed25519`
+   alone satisfies only the first — and the symptom is confusing: the server still
+   *offers* `ssh-ed25519` unless it is restricted further, while the host key is
+   refused with `WS_UNIMPLEMENTED_E` (-1017) or the key exchange fails after the
+   client sends `KEX_ECDH_INIT`.
+7. **The host key must be PKCS#8 DER and must carry its public half.**
+   - PEM and OpenSSH-format host keys are only parsed when wolfSSH is built with
+     `WOLFSSH_CERTS` (`--enable-certs`), which is X.509 support we deliberately do
+     not carry. Without it `wolfSSH_ProcessBuffer` answers
+     `WS_UNIMPLEMENTED_E` (-1017) for both.
+   - OpenSSL's `genpkey -algorithm ED25519` writes PKCS#8 **without** the public
+     key, and a `openssl pkey` round-trip does not add it either. wolfSSL then
+     imports the private part alone, and wolfSSH's `wc_ed25519_export_public`
+     fails with `PUBLIC_KEY_E` (-134) — after the client has already sent
+     `KEX_ECDH_INIT`, so the client only reports “Connection closed”.
+   - `wc_Ed25519KeyToDer()` writes both halves; `wc_Ed25519PrivateKeyToDer()`
+     writes the private one only. rossh therefore generates its own key:
+     `rossh --genkey <file>`. That is also the only option on the target, which
+     has neither openssl nor ssh-keygen.
 
 ## Verified result
 
@@ -135,13 +163,13 @@ src/.libs/libwolfssh.a                                       1,024,866 bytes
 
 ## Open items
 
-- The full cross-build was verified from the release archives. The submodule
-  path was verified as far as `autogen.sh` + a generated `configure`; a full
-  submodule-based cross-build runs as part of M1.
-- The spike linked the *upstream example*. Our own server is not written yet.
+- The submodule-based cross-build is what the repo builds with, both natively
+  (`make`) and for ReactOS (`make win32`).
 - `wolfSSHd`, wolfSSH's own Windows server, is deliberately not used: its Windows
   authentication goes through the token stack (`SetupUserTokenWin`), which is
   exactly what we avoid on ReactOS ([../spec.md](../spec.md) §4.2).
-- Whether the *static* wolfSSL RNG path can be redirected cleanly
-  (`CUSTOM_RAND_GENERATE_BLOCK` / `wc_SetSeed_Cb`) is not yet verified — it is
-  the first task of M1.
+- Both flavors build: `make` and `make win32`. Only the native one is *run* by
+  `tools/m1-check.sh`; running `rossh.exe` on the VM is the next step.
+- Changing the flags in this script forces a rebuild (it records them in
+  `build/<flavor>/flags`): `make` alone would keep stale objects, because it
+  tracks headers and not build variables.

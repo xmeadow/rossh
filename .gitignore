@@ -5,6 +5,8 @@
 wSSH/
 
 # --- Build output ------------------------------------------------------------
+rossh
+rossh.exe
 rssh
 rssh.exe
 *.o
@@ -12,6 +14,10 @@ rssh.exe
 *.a
 *.exe
 *.pdb
+
+# --- Local host keys: never committed ----------------------------------------
+rossh_hostkey
+rossh_hostkey.*
 
 # --- Secrets and local deploy scaffolding ------------------------------------
 # Host keys, private keys and the credentials-bearing deploy scripts must never

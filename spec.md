@@ -162,8 +162,9 @@ made the decision easy:
 - imports confined to `ADVAPI32`, `CRYPT32`, `KERNEL32`, `msvcrt`, `WS2_32`
 - no UCRT, no `vcruntime`, no `bcrypt`
 - and its only "modern" import is `CryptGenRandom` — the weak RNG of §6.1, which
-  we must therefore intercept (`CUSTOM_RAND_GENERATE_BLOCK` / `wc_SetSeed_Cb`,
-  to be verified in M1)
+  we must therefore intercept. **Done in M1**: wolfSSL is built with
+  `-DWC_RNG_SEED_CB`, which removes its built-in seeding path entirely, so
+  `src/rng.c` is the only source of key material (`wc_SetSeed_Cb`).
 
 This ends the "dependency-free" character that the sibling project `igor` is
 proud of. That is a deliberate trade: two weeks of transport and crypto debugging
@@ -215,6 +216,10 @@ invocations need `%SystemRoot%\system32` prepended.
 
 - **Algorithm offer:** `tools/probe/kexinit.py` against the legacy wSSH and
   against rossh, to show the offer actually changed. Unauthenticated by design.
+- **Milestone checks:** `tools/m1-check.sh` starts the server on a spare port and
+  asserts both criteria of M1 — the offer, and that a stock client reaches
+  authentication with no `-o` flags. Extend it per milestone rather than relying
+  on manual runs.
 - **Protocol regression:** saved `ssh -vvv` transcripts as fixtures.
 - **Integration:** the Igor deploy loop — `deploy.sh` must work unchanged, minus
   the `-o` flags.
@@ -229,7 +234,7 @@ invocations need `%SystemRoot%\system32` prepended.
 | # | Content | Done when |
 | - | ------- | --------- |
 | M0 | Recon: behaviour corpus, platform facts, alternatives evaluated, wolfSSH cross-build validated | done — `docs/` and `docs/build.md` |
-| M1 | Vendored build wired in; wolfCrypt's RNG redirected to our pool; offer `curve25519-sha256` + `ssh-ed25519` + `aes256-gcm` | `ssh -p 2222` reaches authentication — and fails there, as expected — and `tools/probe/kexinit.py` shows the modern offer |
+| M1 | Vendored build wired in; wolfCrypt's RNG redirected to our pool; offer `curve25519-sha256` + `ssh-ed25519` + `aes256-gcm` | done — `tools/m1-check.sh` passes: the offer is exactly §4.1, and a stock client negotiates `curve25519-sha256`/`ssh-ed25519`/`aes128-gcm@openssh.com` with no `-o` flags and is refused at authentication |
 | M2 | Authentication + exec channel | `ssh -p 2222 user@host cmd.exe /c ver` prints output with a correct exit status; `deploy.sh` works |
 | M3 | SFTP v3 + jail | `scp` works **without** `-O` |
 | M4 | Service, ini compatibility, logging | runs as a service next to wSSH, config parses wSSH files |
