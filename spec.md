@@ -257,7 +257,7 @@ invocations need `%SystemRoot%\system32` prepended.
 | M1 | Vendored build wired in; wolfCrypt's RNG redirected to our pool; offer `curve25519-sha256` + `ssh-ed25519` + `aes256-gcm` | done — `tools/m1-check.sh` passes: the offer is exactly §4.1, and a stock client negotiates `curve25519-sha256`/`ssh-ed25519`/`aes128-gcm@openssh.com` with no `-o` flags and is refused at authentication |
 | M2 | Authentication + exec channel | done — `tools/m2-check.sh` passes: an authorised key logs in, an unauthorised one is refused, and `exec` returns stdout and the command's exit status unchanged |
 | M3 | SFTP v3; the root is a starting directory | done — `scp` works **without** `-O`, both ways, byte for byte, on ReactOS and Windows 7; `tools/m3-check.sh` passes |
-| M3.5 | Client: `ssh [user@]host <command>` from ReactOS | the same binary answers to `ssh` and runs one command against our own server, returning its exit status — `tools/client-check.sh` passes |
+| M3.5 | Client: `ssh [user@]host <command>` from ReactOS | done — the same binary answers to `ssh`, runs one command against our own server and against a stock OpenSSH server, and returns its exit status. `tools/client-check.sh` passes; verified on ReactOS 0.4.16 talking to OpenSSH 10 |
 | M4 | Service, config, logging | runs as a service next to wSSH, with per-user policy |
 | M5 | Optional: tunnels | — |
 

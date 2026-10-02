@@ -35,9 +35,12 @@ as **`ssh`**, so the ReactOS box can itself do `ssh user@host <command>`.
 
 This is verified on **Linux** (`tools/m1-check.sh`, `m2-check.sh`, `m3-check.sh`,
 `client-check.sh`) and on the real targets: **ReactOS 0.4.16** and **Windows 7
-SP1** both serve the handshake, `exec`, `scp` and `--genkey`. The start-up wall
-that once stopped the binary from reaching `main` on ReactOS is solved — see
-[docs/reactos.md](docs/reactos.md) §9 and §9.1. `make win32` produces a 32-bit
+SP1** both serve the handshake, `exec`, `scp` and `--genkey`. The **client** is
+likewise verified on ReactOS: run as `ssh`, it connects to a stock OpenSSH 10
+server on the LAN, runs a command and returns its exit status unchanged. The
+start-up walls that once stopped the binary from reaching `main` on ReactOS, and
+later stopped the client before its first byte, are all solved — see
+[docs/reactos.md](docs/reactos.md) §9, §9.1 and §9.2. `make win32` produces a 32-bit
 `rossh.exe` importing only `ADVAPI32`, `CRYPT32`, `KERNEL32`, `msvcrt` and
 `WS2_32`, at subsystem 4.0: no UCRT, no `vcruntime`, no `bcrypt`.
 

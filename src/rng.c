@@ -234,6 +234,6 @@ void rng_start(void)
     /* From here on wolfSSL has no seeding path of its own. */
     wc_SetSeed_Cb(seed_cb);
 
-    printf("rng: pool primed with %u bytes of platform entropy\n",
-           (unsigned)got);
+    fprintf(stderr, "rng: pool primed with %u bytes of platform entropy\n",
+            (unsigned)got);
 }

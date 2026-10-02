@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include "b64.h"
+#include "rng.h"
 #include "client.h"
 
 #ifdef _WIN32
@@ -42,6 +43,12 @@ static const char *algo_cipher  = "aes256-gcm@openssh.com,"
                                   "aes128-gcm@openssh.com,aes256-ctr";
 static const char *algo_mac     = "hmac-sha2-256";
 static const char *algo_keys    = "ssh-ed25519";
+
+/* -v/--verbose: where a session stalls, so a remote box with no debugger can
+ * still say which step it reached. stderr, never stdout — stdout is the
+ * remote command's output. */
+static int g_verbose;
+#define VTRACE(...) do { if (g_verbose) fprintf(stderr, __VA_ARGS__); } while (0)
 
 /*
  * What the auth callback has to hand wolfSSH: the key type, the public blob in
@@ -340,6 +347,7 @@ static int session_run(const client_opts_t *o)
         fprintf(stderr, "ssh: cannot read the private key '%s'\n", o->key_path);
         return 255;
     }
+    VTRACE("ssh: read %u bytes of key from '%s'\n", (unsigned)keySz, o->key_path);
 
     /* Fill the auth material in once: the private half in the shape wolfSSH
      * asks for, and the public blob derived from it, so a client key stays one
@@ -399,6 +407,7 @@ static int session_run(const client_opts_t *o)
         wolfSSH_CTX_free(ctx);
         return 255;
     }
+    VTRACE("ssh: connected to %s:%d as '%s'\n", o->host, o->port, o->user);
 
     ssh = wolfSSH_new(ctx);
     if (ssh == NULL) {
@@ -420,6 +429,7 @@ static int session_run(const client_opts_t *o)
     }
 
     rc = wolfSSH_connect(ssh);
+    VTRACE("ssh: wolfSSH_connect rc=%d err=%d\n", rc, wolfSSH_get_error(ssh));
     /* The return value can be a plain failure while the *error* says the
      * handshake actually finished and the peer already sent channel data
      * (WS_CHAN_RXD) — which is the normal case here, since the command's output
@@ -438,6 +448,7 @@ static int session_run(const client_opts_t *o)
     for (;;) {
         rc = wolfSSH_stream_read(ssh, (byte *)buf, (word32)sizeof buf);
         if (rc > 0) {
+            VTRACE("ssh: read %d bytes\n", rc);
             fwrite(buf, 1, (size_t)rc, stdout);
             fflush(stdout);
             continue;
@@ -448,12 +459,14 @@ static int session_run(const client_opts_t *o)
         break;
     }
     fflush(stdout);
+    VTRACE("ssh: channel closed (err=%d)\n", wolfSSH_get_error(ssh));
 
     /* The exit status travels as its own channel request, which can land after
      * the command's output has ended. Give the session one more turn before
      * asking for it. */
     wolfSSH_worker(ssh, NULL);
     status = wolfSSH_GetExitStatus(ssh);
+    VTRACE("ssh: exit status %d\n", status);
     if (status < 0)
         status = 1;
 
@@ -472,12 +485,13 @@ static void client_usage(void)
 {
     fprintf(stderr,
         "usage: ssh [-p port] [-i key] [-l user] [--known-hosts file]\n"
-        "           [--insecure] [user@]host [command]\n"
+        "           [--insecure] [-v] [user@]host [command]\n"
         "\n"
         "  -i key            PKCS#8 DER ed25519 private key "
         "(rossh --genkey <path>)\n"
         "  --known-hosts f   trust-on-first-use store (default: known_hosts)\n"
-        "  --insecure        do not verify the host key (prints a warning)\n");
+        "  --insecure        do not verify the host key (prints a warning)\n"
+        "  -v                trace each step to stderr\n");
 }
 
 int client_main(int argc, char **argv)
@@ -509,6 +523,8 @@ int client_main(int argc, char **argv)
             o.known_hosts = argv[++i];
         else if (strcmp(a, "--insecure") == 0)
             o.insecure = 1;
+        else if (strcmp(a, "-v") == 0 || strcmp(a, "--verbose") == 0)
+            g_verbose = 1;
         else if (target == NULL && a[0] != '-')
             target = a;
         else
@@ -560,6 +576,25 @@ int client_main(int argc, char **argv)
         fprintf(stderr, "ssh: no user name — use -l <user> or user@host\n");
         return 2;
     }
+
+#ifdef _WIN32
+    /* Winsock has to be up before gethostbyname() or socket(). On Linux this is
+     * implicit, which is why the native build never missed it. */
+    {
+        WSADATA wsa;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+            fprintf(stderr, "ssh: WSAStartup failed\n");
+            return 255;
+        }
+    }
+#endif
+
+    /* wolfCrypt's global state — in particular the mutex guarding its DRBG —
+     * has to exist before the first RNG use. The key exchange draws random
+     * numbers, so the client needs the same start-up the server does; without
+     * it the first RNG call deadlocks on ReactOS (a zeroed mutex is harmless on
+     * Linux, which is why the native build never missed it). */
+    rng_start();
 
     return session_run(&o);
 }

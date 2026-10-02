@@ -207,6 +207,30 @@ listens, and a stock `ssh` client — no crypto options of its own — completes
 handshake, is authenticated by public key, runs `whoami` through the exec
 channel and gets exit status 0 back.
 
+### 9.2 Resolved: the client stalled before its first byte — two Windows start-ups
+
+Bringing up the **client** (spec.md §10, M3.5) hit the same class of gap as §9.1,
+twice. Both are invisible natively and both look like a hang, not an error.
+
+**Winsock.** `gethostbyname()` and `socket()` fail until `WSAStartup()` has run.
+On Linux this is implicit, so the native build never needed it; the server did it
+from the start, but the client path returns before that point. Symptom: an
+immediate `cannot resolve '<ip>'` for a literal address. Fix: the client calls
+`WSAStartup(MAKEWORD(2, 2), …)` before it builds a session.
+
+**wolfCrypt's mutex.** The client never called `rng_start()`, so `wolfCrypt_Init()`
+— and with it the mutex guarding wolfSSL's DRBG — never ran. The key exchange
+draws random numbers for its ephemeral Curve25519 key, so the first RNG use
+locked an all-zero `CRITICAL_SECTION`: a hang before any packet was sent, which is
+why the client's own trace stopped right after `connected`. This is exactly §9.1,
+from the other direction; the fix is the same call the server makes. (`rng_start()`
+now reports on stderr — the client's stdout is the remote command's output.)
+
+**Verified.** On ReactOS 0.4.16: `rossh.exe` invoked as `ssh` connects to an
+OpenSSH 10 server on the LAN, authenticates by public key, runs a command, receives
+its stdout, and returns the remote exit status unchanged — e.g. a remote `exit 7`
+comes back as exit code 7.
+
 ## 10. Working on the box: what the tooling demands
 
 Every item below cost real time, and each has a workaround. They are properties
