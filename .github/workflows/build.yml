@@ -1,0 +1,82 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # The native build is also the test build: the four acceptance checks of
+  # spec.md §10 run a real server on a spare port and talk to it with the
+  # runner's stock OpenSSH client.
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool openssh-client
+
+      # wolfSSL and wolfSSH are configured and compiled out-of-tree into
+      # build/native/prefix, which takes a few minutes. The key covers the
+      # pinned submodule commits and the script that drives the build, so the
+      # cache is dropped exactly when one of those changes.
+      - name: Key the dependency cache on the pinned submodules
+        run: git submodule status > .deps-cache-key
+
+      - uses: actions/cache@v4
+        with:
+          path: build/native
+          key: deps-native-${{ runner.os }}-${{ hashFiles('.deps-cache-key', 'tools/build-deps.sh') }}
+
+      - name: Build
+        run: make
+
+      - name: M1 — algorithm offer and a stock client reaching auth
+        run: tools/m1-check.sh
+
+      - name: M2 — publickey auth and exec
+        run: tools/m2-check.sh
+
+      - name: M3 — scp over SFTP, both directions
+        run: tools/m3-check.sh
+
+      - name: Client — rossh's own ssh against rossh, and trust on first use
+        run: tools/client-check.sh
+
+  # The build that ships. No checks here: the binary is for ReactOS and
+  # Windows, which the runner cannot execute.
+  win32:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool gcc-mingw-w64-i686 nsis
+
+      - name: Key the dependency cache on the pinned submodules
+        run: git submodule status > .deps-cache-key
+
+      - uses: actions/cache@v4
+        with:
+          path: build/win32
+          key: deps-win32-${{ runner.os }}-${{ hashFiles('.deps-cache-key', 'tools/build-deps.sh') }}
+
+      - name: Build rossh.exe and the installer
+        run: make installer
+
+      - name: Upload the unreleased binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: win32
+          path: |
+            rossh.exe
+            rossh-setup.exe

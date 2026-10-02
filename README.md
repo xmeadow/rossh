@@ -165,10 +165,12 @@ docs/
   reactos.md           platform constraints, each with its evidence
   alternatives.md      the routes evaluated, and why this one was chosen
   build.md             the verified cross-build recipe and its workarounds
+  index.html           the download page, served from this directory
 src/                   the program: main, session, client, service, setup, …
 installer/rossh.nsi    the NSIS script behind rossh-setup.exe
 tools/                 build-deps.sh and the check scripts (m1/m2/m3/client)
 third_party/           wolfSSL + wolfSSH, pinned submodules
+.github/workflows/     build on every push, release on a v* tag
 ```
 
 ## Background

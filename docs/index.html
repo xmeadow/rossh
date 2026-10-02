@@ -1,0 +1,122 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
+    "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>rossh - download</title>
+<style type="text/css">
+body  { font-family: Verdana, Arial, sans-serif; font-size: 13px;
+        background: #ffffff; color: #000000; margin: 24px; }
+td,th { font-family: Verdana, Arial, sans-serif; font-size: 13px;
+        padding: 5px 10px; text-align: left; vertical-align: top; }
+th    { background: #e8e8e8; }
+h1    { font-size: 22px; margin-bottom: 2px; }
+h2    { font-size: 15px; margin-top: 24px; }
+tt    { font-family: "Courier New", Courier, monospace; }
+.page { width: 640px; margin-left: auto; margin-right: auto; text-align: left; }
+.sub  { color: #555555; margin-top: 0px; }
+.cap  { color: #555555; font-size: 11px; margin-top: 4px; }
+.foot { color: #555555; font-size: 12px; }
+</style>
+</head>
+
+<body bgcolor="#ffffff" text="#000000" link="#0000cc" vlink="#551a8b">
+
+<!-- <center> and align="center" are here for the old browsers this page is
+     meant for; the .page margins do the same for everything newer. -->
+<center>
+<table class="page" border="0" cellspacing="0" cellpadding="0" width="640" align="center">
+<tr><td>
+
+<h1>rossh</h1>
+<p class="sub">An SSH server and client for ReactOS and older Windows.</p>
+
+<!-- Drop screenshot-small.png next to this file and uncomment:
+<p><img src="screenshot-small.png" width="640" border="1"
+        alt="connecting to a ReactOS machine with ssh"></p>
+<p class="cap">rossh serving a session on ReactOS 0.4.16.</p>
+-->
+
+<p>One static executable. Nothing to install on the target beyond picking a
+key, and any stock SSH client connects to it with no special options - modern
+key exchange and ciphers, public-key authentication, <tt>exec</tt>,
+<tt>scp</tt>/SFTP and an interactive shell. Verified on ReactOS 0.4.16 and
+Windows 7 SP1.</p>
+
+<h2>Download the latest release</h2>
+
+<table border="1" cellspacing="0" cellpadding="0" width="100%">
+<tr>
+  <th width="45%">File</th>
+  <th>For</th>
+</tr>
+<tr>
+  <td><a href="https://github.com/xmeadow/rossh/releases/latest/download/rossh-setup.exe"><b>rossh-setup.exe</b></a></td>
+  <td>ReactOS and Windows, 32-bit. The installer: host key, config, service
+      and firewall rule in one step. Start here.</td>
+</tr>
+<tr>
+  <td><a href="https://github.com/xmeadow/rossh/releases/latest/download/rossh-win32-i686.exe">rossh-win32-i686.exe</a></td>
+  <td>The same program without the installer, if you would rather place it
+      yourself.</td>
+</tr>
+<tr>
+  <td><a href="https://github.com/xmeadow/rossh/releases/latest/download/rossh-linux-x86_64">rossh-linux-x86_64</a></td>
+  <td>Linux, 64-bit. The development and test build.</td>
+</tr>
+<tr>
+  <td><a href="https://github.com/xmeadow/rossh/releases/latest/download/SHA256SUMS">SHA256SUMS</a></td>
+  <td>Checksums for the three files above.</td>
+</tr>
+</table>
+
+<p>These links always point at the newest release. The version is shown on the
+<a href="https://github.com/xmeadow/rossh/releases/latest">release page</a>.</p>
+
+<h2>Running it</h2>
+
+<p>Run the installer on the ReactOS or Windows machine. It asks for the public
+key to authorise and the port to listen on, installs to
+<tt>C:\Program Files\rossh</tt>, and registers an auto-start service. Then,
+from anywhere else:</p>
+
+<table border="0" cellspacing="0" cellpadding="0" width="100%"><tr><td bgcolor="#f4f4f4">
+<pre>
+$ ssh  user@reactos-box "dir C:\"             <i>run one command</i>
+$ scp  notes.txt user@reactos-box:/notes.txt  <i>copy a file (to C:\notes.txt)</i>
+$ ssh  user@reactos-box                       <i>open a shell</i>
+</pre>
+</td></tr></table>
+
+<p>The same binary is also the client, so the ReactOS box can reach out as
+well: copy it to <tt>ssh.exe</tt>, or pass <tt>--client</tt>. Keys are ed25519
+in PKCS#8 DER, and <tt>rossh --genkey</tt> writes a pair.</p>
+
+<h2>Worth knowing</h2>
+
+<p>The server handles one session at a time, authenticates by key only without
+checking the user name, and its SFTP root is a starting directory rather than a
+jail. The interactive shell on ReactOS and Windows is line-oriented - there is
+no ConPTY there, so full-screen programs are out of scope. The
+<a href="https://github.com/xmeadow/rossh#limitations">README</a> lists all of
+it.</p>
+
+<h2>More</h2>
+
+<ul>
+<li><a href="https://github.com/xmeadow/rossh">Source code and README</a></li>
+<li><a href="https://github.com/xmeadow/rossh/releases">All releases</a></li>
+<li><a href="https://github.com/xmeadow/rossh/issues">Issues</a></li>
+</ul>
+
+<hr>
+<p class="foot">rossh is GPLv3 licensed, because it links
+<a href="https://github.com/wolfSSL/wolfssh">wolfSSH</a>. The binaries above
+are built from the tagged source by GitHub Actions.</p>
+
+</td></tr>
+</table>
+</center>
+
+</body>
+</html>

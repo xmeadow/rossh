@@ -1,0 +1,59 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool openssh-client \
+                                  gcc-mingw-w64-i686 nsis
+
+      - name: Build the native binary and run the acceptance checks
+        run: |
+          make
+          tools/m1-check.sh
+          tools/m2-check.sh
+          tools/m3-check.sh
+          tools/client-check.sh
+          mv rossh rossh-native
+
+      - name: Build rossh.exe and the installer
+        run: |
+          make installer VERSION="${GITHUB_REF_NAME#v}"
+
+      - name: Collect the assets
+        run: |
+          mkdir dist
+          # The names carry no version on purpose: that is what makes
+          # /releases/latest/download/<name> a link the download page can keep
+          # without being edited for every release. The version is the release
+          # itself, and the installer records it in Add/Remove Programs.
+          cp rossh-setup.exe dist/rossh-setup.exe
+          cp rossh.exe       dist/rossh-win32-i686.exe
+          cp rossh-native    dist/rossh-linux-x86_64
+          # From inside dist, so the names in the file are the names the assets
+          # have once downloaded — `sha256sum -c SHA256SUMS` works where they
+          # land.
+          cd dist && sha256sum rossh-* > SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "rossh $GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/*
