@@ -129,37 +129,76 @@ ReactOS' loader behaviour here has not been established.
 **4.0 (NT4)** — older than wSSH itself ([build.md](build.md)). The question
 remains live for the off-the-shelf route, see [alternatives.md](alternatives.md).
 
-## 9. An unexplained wall: rossh.exe never reaches `main`
+## 9. Resolved: `main` was never reached — an unresolvable import
 
-Recorded because it is the current blocker, and because the evidence is worth
-more than the theory.
+**Symptom (as it looked).** `rossh.exe` started on the VM — the process existed
+and stayed resident — but produced nothing on stdout or stderr, never listened,
+and a file written as the *first statement of `main`* never appeared. It looked
+exactly like a hang before `main`. Stripping (1.82 MB → 894 KB, 16 → 8 sections)
+changed nothing; neither did dropping `crypt32`.
 
-**Symptom.** `rossh.exe` runs on the VM — the process exists and stays — but it
-produces nothing on stdout or stderr, never listens, and a file written as the
-*first statement of `main`* never appears. So `main` is not reached.
+**Root cause: an import the loader cannot resolve.** wolfSSH's Windows port
+(`port.c`, `ssh.c`) calls seven C11 Annex K "secure" CRT functions that
+ReactOS's `msvcrt.dll` does not export:
 
-| Probe | Result | Rules out |
-| ----- | ------ | --------- |
-| `hello.exe`, 230 KB, same `i686-w64-mingw32-gcc -static` flags | runs, prints, writes a file | the toolchain, the CRT, the loader, stdout, file I/O |
-| `igor.exe` | runs (per this knowledge base) | `KERNEL32`, `msvcrt`, `WINHTTP` |
-| `certutil.exe` | runs | `crypt32` |
-| `reg.exe` | runs | `advapi32` |
-| `ping.exe` | runs | `ws2_32` |
-| `rossh.exe` | hangs before `main` | — |
+    fopen_s  mbstowcs_s  wcstombs_s  strncat_s  strncpy_s  strtok_s  _snprintf_s
 
-So it is neither the DLLs we import nor our application code: it is specific to
-this binary's start-up. What remains are the things a large, statically linked
-mingw image needs *before* `main` — runtime pseudo-relocations, image
-composition — on a loader that is not quite Windows.
+mingw-w64 declares them `__declspec(dllimport)`, so the calls go through the
+import pointers `__imp__*` and the linker records a real import from
+`msvcrt.dll`. ReactOS's loader cannot resolve it and — instead of failing the
+process — never starts it. The process exists, the entry point is never reached.
+Nothing in our code runs, so no diagnostic of ours can ever fire.
 
-**Unproven.** The next experiments would be a hello-world that links a single
-wolfSSH symbol (separating "the library" from "our start-up"), and one that writes
-a file from a constructor.
+**How it was found.** A full import-by-import comparison of the built image
+against the DLLs taken off the box: `objdump -p rossh.exe` versus the exports of
+ReactOS's `msvcrt.dll`, `kernel32.dll`, `ws2_32.dll` and `advapi32.dll`. Exactly
+those seven were missing, and nothing else was. A 14 KB reproducer that imports
+one of them and nothing else reproduces the hang exactly.
 
-Two reductions are cheap and worth having regardless: stripping the win32 binary
-halves it (1.82 MB → 894 KB, 16 sections → 8), and dropping `crypt32` — which
-arrives only through wolfSSL's system certificate store, unused here — removes an
-import.
+| Probe | Result |
+| ----- | ------ |
+| entry-point probe (`-Wl,-e`, CRT bypassed) | runs |
+| `__attribute__((constructor))` probe | runs |
+| 614 KB / 405 KB `.text` / ~6300 relocations, kernel32+msvcrt | all run |
+| 614 KB with `ws2_32` + `advapi32`, `WSAStartup` + `CryptAcquireContext` | runs |
+| 14 KB importing only `msvcrt!strncpy_s` | hangs — reproduces it |
+| `rossh.exe` (before fix) | hangs |
+
+So it was never size, section count, relocation count, `.eh_frame`, the CRT, or
+the WolfSSL code itself.
+
+**Fix.** `src/reactos_crt.c` implements the seven functions with MSVC semantics
+and defines the `__imp__*` pointers to point at them, so the import never enters
+the image. No submodule is patched. `tools/build-deps.sh` also builds wolfSSL
+with `--enable-cryptonly`, which removes the leftover `crypt32` import.
+
+The general lesson is worth keeping: **a missing import on ReactOS is not an
+error and not a crash.** It is a living process that does nothing, writes nothing
+on any channel, and looks exactly like a hang.
+
+### 9.1 The wall behind it: `wc_InitRng` hangs
+
+With `main` reachable, the next blocker surfaced at once, and this one is real:
+`wc_InitRng()` never returns on this box. It is not our entropy pool.
+
+| Probe | Result |
+| ----- | ------ |
+| `rossh.exe --genkey C:\k.der` | stalls after `rng done`; no key written |
+| `rng_start()` | returns |
+| `SystemFunction036` (RtlGenRandom), two calls | both return |
+| `wc_InitRng(&rng)` | never returns |
+| `wc_InitRng` with a trivial `memset` seed callback (no pool) | never returns |
+
+So `RtlGenRandom` is fine, our callback is not the problem, and the stall is
+inside wolfSSL's RNG initialisation — which runs a self-test unconditionally
+(`wc_RNG_HealthTestLocal`) before it seeds. Next session: a `DEBUG_WOLFSSL` build
+with the log routed to the trace file, or the ReactOS debug output.
+
+**Consequence today.** With the import fixed, `rossh.exe` reaches `main`, starts,
+loads a host key and listens; a stock client connects and the handshake begins.
+Supplying a host key made elsewhere (the native `rossh --genkey`) is enough to
+bring the server up. The handshake then stops in the same `wc_InitRng` path, so
+`--genkey` and the handshake are the two remaining pieces.
 
 ## 10. Working on the box: what the tooling demands
 

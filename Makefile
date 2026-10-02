@@ -37,8 +37,9 @@ CFLAGS += -DDEBUG_WOLFSSH
 endif
 
 LDLIBS_native = -lwolfssh -lwolfssl -lm
-# crypt32: wolfSSL's X.509 store code. advapi32: RtlGenRandom in src/rng.c.
-LDLIBS_win32  = -lwolfssh -lwolfssl -lws2_32 -lcrypt32 -ladvapi32
+# advapi32: RtlGenRandom in src/rng.c. No crypt32: wolfSSL is built
+# --enable-cryptonly, so its X.509 store code never enters the image.
+LDLIBS_win32  = -lwolfssh -lwolfssl -lws2_32 -ladvapi32
 
 # Strip the Windows binary: we do not need debug info inside it, it halves the
 # image (1.8 MB -> 894 KB, 16 sections -> 8) and every section the loader does not

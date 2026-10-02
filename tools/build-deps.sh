@@ -56,15 +56,25 @@ extra=${EXTRA_CPPFLAGS:-}
 wolfssl_cppflags="-DWC_RNG_SEED_CB${extra:+ $extra}"
 wolfssh_cppflags="-I$shim${extra:+ $extra}"
 
-# No ML-KEM: wolfSSH 1.5.0 includes a header that wolfSSL 5.9.2 no longer ships,
-# and post-quantum hybrid KEX is not wanted on ReactOS anyway. See docs/build.md.
+# Three of these flags are not optional. Each was found the hard way; the full
+# story is in docs/build.md.
 #
-# --enable-ed25519-stream is required, not optional: wolfSSH compiles Ed25519 out
-# entirely unless wolfSSL defines HAVE_ED25519, WOLFSSL_ED25519_STREAMING_VERIFY,
-# HAVE_ED25519_KEY_IMPORT and HAVE_ED25519_KEY_EXPORT all at once (wolfssh/
-# internal.h). Passing only --enable-ed25519 satisfies the first.
+# --disable-mlkem --disable-pqc-hybrids: wolfSSH 1.5.0 includes a header that
+#   wolfSSL 5.9.2 no longer ships, and post-quantum hybrid KEX is not wanted on
+#   ReactOS anyway.
+# --enable-ed25519-stream: wolfSSH compiles Ed25519 out entirely unless wolfSSL
+#   defines HAVE_ED25519, WOLFSSL_ED25519_STREAMING_VERIFY,
+#   HAVE_ED25519_KEY_IMPORT and HAVE_ED25519_KEY_EXPORT all at once
+#   (wolfssh/internal.h). --enable-ed25519 alone satisfies only the first.
+# --enable-cryptonly: we are an SSH server, not a TLS client. Otherwise one
+#   symbol drags the whole TLS layer in at link time:
+#       asn.o (GetCA) -> ssl.o -> tls.o, tls13.o -> CRYPT32
+#   That is ~40 KB of code and imports we never call, and on ReactOS every
+#   import and relocation the loader has to resolve is a liability
+#   (docs/reactos.md section 9).
 wolfssl_opts="--enable-wolfssh --enable-curve25519 --enable-ed25519 \
---enable-ed25519-stream --enable-aesgcm --enable-static --disable-shared \
+--enable-ed25519-stream --enable-aesgcm --enable-cryptonly \
+--enable-static --disable-shared \
 --disable-examples --disable-crypttests --disable-mlkem --disable-pqc-hybrids"
 
 # SFTP only, no SCP: --enable-scp does not build for mingw.
