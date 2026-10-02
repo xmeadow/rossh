@@ -45,6 +45,13 @@ Windows service (auto-start, LocalSystem), and `rossh setup` does all of it in
 one step — host key, config, an authorised key, the service, the firewall — so
 the machine answers right after. Per-user policy is still to come.
 
+**M5 gives an interactive shell.** `ssh host` with no command now opens a
+session with a prompt. Natively the shell runs on a real pty (`forkpty`); on
+Windows and ReactOS it is a pipe-fed `cmd.exe` with echo and line editing done
+on this side — there is no ConPTY there, so a prompt and a command loop are what
+you get, not full-screen programs. Verified on ReactOS 0.4.16 with both our own
+client and a stock OpenSSH client.
+
 The start-up walls that once stopped the binary from reaching `main` on ReactOS,
 and later stopped the client before its first byte, are all solved — see
 [docs/reactos.md](docs/reactos.md) §9, §9.1 and §9.2. `make win32` produces a

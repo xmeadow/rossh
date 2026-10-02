@@ -19,14 +19,29 @@
 #include "session.h"
 
 #ifdef _WIN32
+    #include <winsock2.h>
     #include <windows.h>
 #else
     #include <sys/wait.h>
+    #include <sys/select.h>
+    #include <sys/ioctl.h>
+    #include <termios.h>
+    #include <pty.h>
+    #include <unistd.h>
+    #include <fcntl.h>
+    #include <signal.h>
+    #include <errno.h>
+    #include <time.h>
 #endif
 
 typedef struct {
     WOLFSSH          *ssh;
     const keylist_t  *keys;
+    WOLFSSH_CHANNEL  *shell;     /* set once a `shell` request arrives */
+    int               term_w;    /* terminal size, from pty-req / window-change */
+    int               term_h;
+    int               term_set;
+    int               pty_fd;    /* the live pty master, for resize; -1 otherwise */
 } session_t;
 
 /* One connection at a time (spec.md §7), so one of these is enough. */
@@ -406,25 +421,452 @@ int session_sftp(WOLFSSH *ssh, const char *root)
     return ret;
 }
 
+/* ----------------------------------------------------------------- shell --- */
+
+/*
+ * Interactive shell (M5).
+ *
+ * The request is trivial — remember the channel, let wolfSSH answer success.
+ * The work is moving bytes between the SSH channel and whatever plays the shell,
+ * and that is where the two targets diverge:
+ *
+ *   POSIX    forkpty() gives a real terminal: line editing, echo, Ctrl-C and
+ *            full-screen programs all come for free. Nothing to emulate.
+ *   Windows  CreateProcess(cmd.exe) on pipes. cmd.exe prints its prompt into a
+ *            pipe and reads command lines from one, but it does not echo and
+ *            has no line editor without a console. So we echo and edit the line
+ *            ourselves and only ever hand cmd.exe a finished line. Full-screen
+ *            programs are out of reach here; the prompt and the loop are not.
+ *
+ * The connection socket goes non-blocking for the duration, so a full channel
+ * window cannot wedge the session (send_to_channel already copes with
+ * WS_WANT_WRITE).
+ */
+
+static void shell_sleep_ms(int ms)
+{
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
+    struct timespec ts;
+    ts.tv_sec  = ms / 1000;
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+#endif
+}
+
+#ifndef _WIN32
+static void shell_set_nonblocking(int fd)
+{
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl >= 0)
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+}
+
+static int shell_write_all(int fd, const byte *buf, size_t len)
+{
+    while (len > 0) {
+        ssize_t n = write(fd, buf, len);
+        if (n > 0) {
+            buf += n;
+            len -= (size_t)n;
+        }
+        else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            shell_sleep_ms(1);
+        }
+        else {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int shell_posix(WOLFSSH *ssh, WOLFSSH_CHANNEL *channel, WS_SOCKET_T fd)
+{
+    struct winsize ws;
+    int            master = -1;
+    pid_t          pid;
+    byte           buf[4096];
+    int            done = 0;
+
+    ws.ws_col    = (unsigned short)((g_session.term_set && g_session.term_w > 0)
+                                    ? g_session.term_w : 80);
+    ws.ws_row    = (unsigned short)((g_session.term_set && g_session.term_h > 0)
+                                    ? g_session.term_h : 24);
+    ws.ws_xpixel = 0;
+    ws.ws_ypixel = 0;
+
+    pid = forkpty(&master, NULL, NULL, &ws);
+    if (pid < 0) {
+        printf("shell: forkpty failed (%d)\n", errno);
+        return -1;
+    }
+    if (pid == 0) {
+        const char *sh = getenv("SHELL");
+        if (sh == NULL || *sh == '\0')
+            sh = "/bin/sh";
+        execl(sh, sh, "-i", (char *)NULL);
+        execl("/bin/sh", "sh", "-i", (char *)NULL);
+        _exit(127);
+    }
+
+    g_session.pty_fd = master;
+    shell_set_nonblocking(master);
+    shell_set_nonblocking((int)fd);
+    printf("shell: pty open, pid %d (%ux%u)\n",
+           (int)pid, (unsigned)ws.ws_col, (unsigned)ws.ws_row);
+    fflush(stdout);
+
+    while (!done) {
+        int progressed = 0;
+
+        for (;;) {                              /* the shell -> the client */
+            ssize_t n = read(master, buf, sizeof buf);
+            if (n > 0) {
+                send_to_channel((const char *)buf, (size_t)n, channel);
+                progressed = 1;
+            }
+            else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                break;
+            }
+            else {
+                done = 1;                       /* EOF: the shell exited */
+                break;
+            }
+        }
+
+        while (!done) {                         /* the client -> the shell */
+            int rc = wolfSSH_stream_read(ssh, buf, (word32)sizeof buf);
+            if (rc > 0) {
+                if (shell_write_all(master, buf, (size_t)rc) != 0)
+                    done = 1;
+                progressed = 1;
+            }
+            else {
+                int e = wolfSSH_get_error(ssh);
+                if (rc == WS_WANT_READ || e == WS_WANT_READ ||
+                    e == WS_WANT_WRITE || e == WS_CHAN_RXD || rc == WS_REKEYING)
+                    break;
+                done = 1;                       /* the client closed */
+            }
+        }
+
+        if (!done && !progressed)
+            shell_sleep_ms(20);
+    }
+
+    g_session.pty_fd = -1;
+    if (master >= 0)
+        close(master);
+    kill(pid, SIGHUP);
+    waitpid(pid, NULL, 0);
+    printf("shell: session ended\n");
+    fflush(stdout);
+    return 0;
+}
+#else
+/*
+ * The child's output has to be read without blocking the loop (which also has
+ * to service the socket), and ReactOS' PeekNamedPipe is not dependable enough to
+ * poll with. So the blocking read lives on its own thread and only ever touches
+ * this ring; the loop drains it.
+ */
+#define PIPE_RING 65536
+
+typedef struct {
+    CRITICAL_SECTION lock;
+    HANDLE           rd;
+    byte             buf[PIPE_RING];
+    size_t           head;
+    size_t           count;
+    int              closed;
+} pipe_ring_t;
+
+static DWORD WINAPI pipe_reader(LPVOID arg)
+{
+    pipe_ring_t *r = (pipe_ring_t *)arg;
+    byte         tmp[2048];
+
+    for (;;) {
+        DWORD got = 0, k;
+
+        if (!ReadFile(r->rd, tmp, (DWORD)sizeof tmp, &got, NULL) || got == 0)
+            break;
+
+        EnterCriticalSection(&r->lock);
+        for (k = 0; k < got; k++) {
+            if (r->count < PIPE_RING) {
+                r->buf[(r->head + r->count) % PIPE_RING] = tmp[k];
+                r->count++;
+            }
+            /* A full ring means the client is far behind; drop rather than block
+             * the reader, since a blocked reader also stalls cmd.exe. */
+        }
+        LeaveCriticalSection(&r->lock);
+    }
+
+    EnterCriticalSection(&r->lock);
+    r->closed = 1;
+    LeaveCriticalSection(&r->lock);
+    return 0;
+}
+
+static size_t pipe_ring_drain(pipe_ring_t *r, byte *out, size_t cap)
+{
+    size_t n, k;
+
+    EnterCriticalSection(&r->lock);
+    n = (r->count < cap) ? r->count : cap;
+    for (k = 0; k < n; k++) {
+        out[k]   = r->buf[r->head];
+        r->head  = (r->head + 1) % PIPE_RING;
+    }
+    r->count -= n;
+    LeaveCriticalSection(&r->lock);
+    return n;
+}
+
+static int pipe_ring_closed(pipe_ring_t *r)
+{
+    int c;
+
+    EnterCriticalSection(&r->lock);
+    c = r->closed;
+    LeaveCriticalSection(&r->lock);
+    return c;
+}
+
+static int shell_windows(WOLFSSH *ssh, WOLFSSH_CHANNEL *channel, WS_SOCKET_T fd)
+{
+    SECURITY_ATTRIBUTES sa;
+    STARTUPINFOA        si;
+    PROCESS_INFORMATION pi;
+    HANDLE              in_r = NULL, in_w = NULL, out_r = NULL, out_w = NULL;
+    HANDLE              reader = NULL;
+    pipe_ring_t         ring;
+    char                shell[MAX_PATH + 32];
+    char                line[1024];
+    size_t              lineLen = 0;
+    byte                buf[4096];
+    DWORD               envLen, written;
+    u_long              one = 1;
+    int                 done = 0, i;
+
+    sa.nLength              = sizeof sa;
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle       = TRUE;
+    if (!CreatePipe(&in_r, &in_w, &sa, 0))
+        return -1;
+    if (!CreatePipe(&out_r, &out_w, &sa, 0)) {
+        CloseHandle(in_r);
+        CloseHandle(in_w);
+        return -1;
+    }
+    /* Our ends must not be inherited, or the child keeps the pipe open and the
+     * read never sees EOF. */
+    SetHandleInformation(in_w,  HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
+
+    envLen = GetEnvironmentVariableA("SystemRoot", shell, sizeof shell - 20);
+    if (envLen > 0 && envLen < sizeof shell - 20)
+        strcat(shell, "\\system32\\cmd.exe");
+    else
+        strcpy(shell, "cmd.exe");
+
+    memset(&si, 0, sizeof si);
+    si.cb         = sizeof si;
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdInput  = in_r;
+    si.hStdOutput = out_w;
+    si.hStdError  = out_w;
+
+    memset(&pi, 0, sizeof pi);
+    if (!CreateProcessA(NULL, shell, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        CloseHandle(in_r);  CloseHandle(in_w);
+        CloseHandle(out_r); CloseHandle(out_w);
+        return -1;
+    }
+    CloseHandle(in_r);
+    CloseHandle(out_w);
+
+    memset(&ring, 0, sizeof ring);
+    ring.rd = out_r;
+    InitializeCriticalSection(&ring.lock);
+    reader = CreateThread(NULL, 0, pipe_reader, &ring, 0, NULL);
+
+    ioctlsocket(fd, FIONBIO, &one);
+    printf("shell: cmd.exe pid %lu\n", (unsigned long)pi.dwProcessId);
+    fflush(stdout);
+
+    while (!done) {
+        int    progressed = 0;
+        size_t n;
+
+        while ((n = pipe_ring_drain(&ring, buf, sizeof buf)) > 0) {   /* shell -> client */
+            send_to_channel((const char *)buf, n, channel);
+            progressed = 1;
+        }
+        if (pipe_ring_closed(&ring)) {
+            /* cmd.exe is gone and the reader has the last of its output; the
+             * drain above already emptied the ring, so the session is over. */
+            done = 1;
+            break;
+        }
+
+        while (!done) {                         /* the client -> the shell */
+            int rc = wolfSSH_stream_read(ssh, buf, (word32)sizeof buf);
+
+            if (rc <= 0) {
+                int e = wolfSSH_get_error(ssh);
+                if (rc == WS_WANT_READ || e == WS_WANT_READ ||
+                    e == WS_WANT_WRITE || e == WS_CHAN_RXD || rc == WS_REKEYING)
+                    break;
+                /* The client stopped sending (EOF) or went away. Close cmd.exe's
+                 * stdin so it sees EOF and exits once it has finished what it
+                 * already has; keep draining until it does. Ending here instead
+                 * would cut off the reply. */
+                if (in_w != NULL) {
+                    CloseHandle(in_w);
+                    in_w = NULL;
+                }
+                break;
+            }
+            progressed = 1;
+            for (i = 0; i < rc; i++) {
+                byte c = buf[i];
+
+                if (c == '\r' || c == '\n') {          /* end of line */
+                    send_to_channel("\r\n", 2, channel);
+                    if (in_w != NULL && lineLen > 0)
+                        WriteFile(in_w, line, (DWORD)lineLen, &written, NULL);
+                    if (in_w != NULL)
+                        WriteFile(in_w, "\r\n", 2, &written, NULL);
+                    lineLen = 0;
+                }
+                else if (c == 0x7f || c == 0x08) {      /* backspace */
+                    if (lineLen > 0) {
+                        lineLen--;
+                        send_to_channel("\b \b", 3, channel);
+                    }
+                }
+                else if (c == 0x03) {                   /* Ctrl-C */
+                    send_to_channel("^C\r\n", 4, channel);
+                    lineLen = 0;
+                }
+                else if (c == 0x04) {                   /* Ctrl-D */
+                    if (lineLen == 0 && in_w != NULL) {
+                        CloseHandle(in_w);              /* EOF: cmd.exe exits */
+                        in_w = NULL;
+                    }
+                }
+                else if (c >= 0x20) {                   /* printable: echo it */
+                    if (lineLen < sizeof line)
+                        line[lineLen++] = (char)c;
+                    send_to_channel((const char *)&c, 1, channel);
+                }
+                /* escape sequences and other control bytes are dropped */
+            }
+        }
+
+        if (!done && !progressed)
+            shell_sleep_ms(20);
+    }
+
+    if (in_w != NULL)
+        CloseHandle(in_w);
+    CloseHandle(out_r);                         /* unblocks the reader */
+    if (reader != NULL) {
+        WaitForSingleObject(reader, 2000);
+        CloseHandle(reader);
+    }
+    DeleteCriticalSection(&ring.lock);
+    TerminateProcess(pi.hProcess, 0);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    printf("shell: session ended\n");
+    fflush(stdout);
+    return 0;
+}
+#endif
+
+static int channel_shell_cb(WOLFSSH_CHANNEL *channel, void *ctx)
+{
+    session_t *s = (session_t *)ctx;
+
+    printf("shell: request (pty=%d)\n", wolfSSH_ChannelIsPty(channel));
+    s->shell = channel;
+    return WS_SUCCESS;
+}
+
+/* pty-req and window-change both land here, before the shell starts and while it
+ * runs. Native builds apply it to the live pty; Windows just remembers it, since
+ * cmd.exe does not care. */
+static int term_resize_cb(WOLFSSH *ssh, word32 w, word32 h,
+                          word32 pw, word32 ph, void *ctx)
+{
+    session_t *s = (session_t *)ctx;
+
+    (void)ssh; (void)pw; (void)ph;
+    s->term_w   = (int)w;
+    s->term_h   = (int)h;
+    s->term_set = 1;
+    printf("shell: terminal %ux%u\n", (unsigned)w, (unsigned)h);
+
+#ifndef _WIN32
+    if (s->pty_fd >= 0) {                       /* live resize of a running shell */
+        struct winsize ws;
+        ws.ws_col    = (unsigned short)w;
+        ws.ws_row    = (unsigned short)h;
+        ws.ws_xpixel = 0;
+        ws.ws_ypixel = 0;
+        ioctl(s->pty_fd, TIOCSWINSZ, &ws);
+    }
+#endif
+    return WS_SUCCESS;
+}
+
+int session_shell_requested(void)
+{
+    return g_session.shell != NULL;
+}
+
+int session_shell(WOLFSSH *ssh, WS_SOCKET_T fd)
+{
+    if (g_session.shell == NULL)
+        return -1;
+#ifdef _WIN32
+    return shell_windows(ssh, g_session.shell, fd);
+#else
+    return shell_posix(ssh, g_session.shell, fd);
+#endif
+}
+
 /* ---------------------------------------------------------------- wiring --- */
 
 int session_configure(WOLFSSH_CTX *ctx)
 {
     wolfSSH_SetUserAuth(ctx, auth_cb);
     wolfSSH_CTX_SetChannelOpenCb(ctx, channel_open_cb);
-    /* The exec callback is what M2 is for. `shell` is deliberately not
-     * registered: there is no pty, so a shell request should fail rather than
-     * hang (spec.md §4.3). */
+    /* `exec` runs one command (M2); `shell` starts the interactive session (M5).
+     * Both are request callbacks; the shell one only records the channel. */
     wolfSSH_CTX_SetChannelReqExecCb(ctx, channel_exec_cb);
     wolfSSH_CTX_SetChannelReqSubsysCb(ctx, channel_subsys_cb);
+    wolfSSH_CTX_SetChannelReqShellCb(ctx, channel_shell_cb);
     return 0;
 }
 
 int session_bind(WOLFSSH *ssh, const keylist_t *keys)
 {
-    g_session.ssh  = ssh;
-    g_session.keys = keys;
+    g_session.ssh      = ssh;
+    g_session.keys     = keys;
+    g_session.shell    = NULL;
+    g_session.term_w   = 80;
+    g_session.term_h   = 24;
+    g_session.term_set = 0;
+    g_session.pty_fd   = -1;
     wolfSSH_SetUserAuthCtx(ssh, &g_session);
     wolfSSH_SetChannelReqCtx(ssh, &g_session);
+    wolfSSH_SetTerminalResizeCb(ssh, term_resize_cb);
+    wolfSSH_SetTerminalResizeCtx(ssh, &g_session);
     return 0;
 }

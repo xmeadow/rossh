@@ -78,7 +78,13 @@ wolfssl_opts="--enable-wolfssh --enable-curve25519 --enable-ed25519 \
 --disable-examples --disable-crypttests --disable-mlkem --disable-pqc-hybrids"
 
 # SFTP only, no SCP: --enable-scp does not build for mingw.
-wolfssh_opts="--enable-sftp --enable-static --disable-shared --disable-examples"
+#
+# --enable-shell turns on WOLFSSH_SHELL. WOLFSSH_TERM (a pty-req and terminal
+# size) is already on by default; the shell flag adds the window-change request
+# handling, which is what lets our resize callback fire when the client's
+# terminal changes size. The shell process itself is ours (src/session.c) —
+# wolfSSH only carries the protocol.
+wolfssh_opts="--enable-sftp --enable-shell --enable-static --disable-shared --disable-examples"
 
 # A change of configuration has to force a rebuild. make does not notice when
 # only the flags change (it tracks headers, not build variables), and that has

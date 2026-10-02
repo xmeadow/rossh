@@ -2,10 +2,11 @@
  * rossh — an SSH server and client for ReactOS.
  *
  * Server mode binds a listener, offers the modern suite of spec.md §4.1, and
- * serves one session at a time: publickey auth, `exec`, and the SFTP subsystem.
- * Client mode — entered when the program is invoked as `ssh`, or with --client —
- * connects out and runs one command. Both live in this one binary; see
- * src/client.c.
+ * serves one session at a time: publickey auth, `exec`, an interactive `shell`
+ * (M5) and the SFTP subsystem. Client mode — entered when the program is invoked
+ * as `ssh`, or with --client — connects out and runs one command, or an
+ * interactive session when no command is given. Both live in this one binary;
+ * see src/client.c.
  */
 
 #include <wolfssl/options.h>
@@ -354,9 +355,13 @@ int server_run(const config_t *cfg, int once)
         /* A client that asked for the sftp subsystem is handed to the SFTP
          * server here — wolfSSH_accept() reports that with WS_SFTP_COMPLETE,
          * having already run the version exchange. exec requests were answered
-         * by their channel callback. */
+         * by their channel callback. A `shell` request only recorded the
+         * channel; the interactive loop runs here, on the socket. */
         if (rc == WS_SFTP_COMPLETE) {
             session_sftp(ssh, cfg->sftp_root[0] != '\0' ? cfg->sftp_root : NULL);
+        }
+        else if (session_shell_requested()) {
+            session_shell(ssh, (WS_SOCKET_T)cfd);
         }
 
         /* Close the session properly. Without this the socket is dropped as

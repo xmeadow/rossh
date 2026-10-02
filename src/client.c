@@ -23,13 +23,18 @@
 
 #ifdef _WIN32
     #include <winsock2.h>
+    #include <windows.h>
+    #include <conio.h>
     typedef SOCKET csock_t;
     #define CSOCK_INVALID INVALID_SOCKET
     #define cclose(f)     closesocket(f)
 #else
     #include <sys/socket.h>
+    #include <sys/select.h>
     #include <netdb.h>
+    #include <termios.h>
     #include <unistd.h>
+    #include <errno.h>
     typedef int csock_t;
     #define CSOCK_INVALID (-1)
     #define cclose(f)     close(f)
@@ -331,6 +336,168 @@ static int hostkey_cb(const byte *pubKey, word32 pubKeySz, void *ctx)
     return known_host_ok(o, b64) ? 0 : -1;
 }
 
+/*
+ * Interactive session (M5): no command given, so ask for a pty and a shell and
+ * pump the local terminal against the channel.
+ *
+ * The remote end echoes what we type — a real pty does it natively, and our own
+ * Windows server echoes for its cmd.exe — so the client never echoes locally. It
+ * only has to stop its own terminal from interfering: raw mode on POSIX, and on
+ * Windows a console with line input, echo and Ctrl-C handling switched off, so a
+ * keystroke reaches the remote verbatim.
+ */
+
+static int interactive_send(WOLFSSH *ssh, const byte *buf, size_t len)
+{
+    size_t sent = 0;
+
+    while (sent < len) {
+        int rc = wolfSSH_stream_send(ssh, (byte *)(buf + sent),
+                                     (word32)(len - sent));
+        if (rc > 0) {
+            sent += (size_t)rc;
+            continue;
+        }
+        {
+            int e = wolfSSH_get_error(ssh);
+            if (rc == WS_WANT_READ || rc == WS_WANT_WRITE ||
+                e == WS_WANT_READ || e == WS_WANT_WRITE || e == WS_CHAN_RXD)
+                continue;
+        }
+        return -1;
+    }
+    return 0;
+}
+
+#ifndef _WIN32
+static int interactive_pump(WOLFSSH *ssh, csock_t fd)
+{
+    struct termios saved, raw;
+    byte           buf[4096];
+    int            have_tty, in_done = 0, out_done = 0;
+
+    have_tty = (isatty(0) == 1);
+    if (have_tty) {
+        if (tcgetattr(0, &saved) != 0)
+            have_tty = 0;
+        else {
+            /* cfmakeraw(), spelled out: it is not in POSIX, so with a strict
+             * -std=c11 -D_POSIX_C_SOURCE build it is not declared. */
+            raw = saved;
+            raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+            raw.c_oflag &= ~(OPOST);
+            raw.c_cflag |=  (CS8);
+            raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+            raw.c_cc[VMIN]  = 1;
+            raw.c_cc[VTIME] = 0;
+            tcsetattr(0, TCSANOW, &raw);
+        }
+    }
+
+    while (!out_done) {
+        fd_set rfds;
+        int    maxfd = ((int)fd > 0 ? (int)fd : 0) + 1;
+
+        FD_ZERO(&rfds);
+        if (!in_done)
+            FD_SET(0, &rfds);
+        FD_SET(fd, &rfds);
+        if (select(maxfd, &rfds, NULL, NULL, NULL) < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+
+        if (!in_done && FD_ISSET(0, &rfds)) {
+            ssize_t n = read(0, buf, sizeof buf);
+            if (n <= 0)
+                in_done = 1;                   /* local input ended */
+            else if (interactive_send(ssh, buf, (size_t)n) != 0)
+                in_done = 1;
+        }
+
+        /* Keep reading after stdin ends: the remote still has output to send and
+         * a channel close to report. Only that close ends the session. */
+        if (FD_ISSET(fd, &rfds)) {
+            int rc = wolfSSH_stream_read(ssh, buf, (word32)sizeof buf);
+            if (rc > 0) {
+                fwrite(buf, 1, (size_t)rc, stdout);
+                fflush(stdout);
+            }
+            else {
+                int e = wolfSSH_get_error(ssh);
+                if (!(rc == WS_WANT_READ || e == WS_WANT_READ ||
+                      e == WS_WANT_WRITE || e == WS_CHAN_RXD || rc == WS_REKEYING))
+                    out_done = 1;
+            }
+        }
+    }
+
+    if (have_tty)
+        tcsetattr(0, TCSANOW, &saved);
+    return 0;
+}
+#else
+static int interactive_pump(WOLFSSH *ssh, csock_t fd)
+{
+    HANDLE hin = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD  saved = 0;
+    byte   buf[4096];
+    int    have_con, done = 0;
+
+    have_con = (hin != NULL && hin != INVALID_HANDLE_VALUE &&
+                GetConsoleMode(hin, &saved) != 0);
+    if (have_con) {
+        /* No line buffering, no local echo, and Ctrl-C arrives as the byte 0x03
+         * rather than raising a signal — which is what the remote shell wants. */
+        SetConsoleMode(hin, 0);
+    }
+
+    while (!done) {
+        fd_set         rfds;
+        struct timeval tv;
+        int            n;
+
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        tv.tv_sec  = 0;
+        tv.tv_usec = 20000;
+        n = select(0, &rfds, NULL, NULL, &tv);      /* winsock ignores nfds */
+        if (n < 0)
+            break;
+
+        if (n > 0 && FD_ISSET(fd, &rfds)) {
+            int rc = wolfSSH_stream_read(ssh, buf, (word32)sizeof buf);
+            if (rc > 0) {
+                fwrite(buf, 1, (size_t)rc, stdout);
+                fflush(stdout);
+            }
+            else {
+                int e = wolfSSH_get_error(ssh);
+                if (!(rc == WS_WANT_READ || e == WS_WANT_READ ||
+                      e == WS_WANT_WRITE || e == WS_CHAN_RXD || rc == WS_REKEYING))
+                    done = 1;
+            }
+        }
+
+        while (!done && _kbhit()) {
+            int c = _getch();
+            if (c == 0 || c == 0xE0) {          /* extended key: drop its code */
+                _getch();
+                continue;
+            }
+            buf[0] = (byte)c;
+            if (interactive_send(ssh, buf, 1) != 0)
+                done = 1;
+        }
+    }
+
+    if (have_con)
+        SetConsoleMode(hin, saved);
+    return 0;
+}
+#endif
+
 static int session_run(const client_opts_t *o)
 {
     WOLFSSH_CTX *ctx = NULL;
@@ -420,12 +587,29 @@ static int session_run(const client_opts_t *o)
     wolfSSH_SetUsername(ssh, o->user);
     wolfSSH_SetPublicKeyCheckCtx(ssh, (void *)o);
 
-    if (o->command != NULL &&
-        wolfSSH_SetChannelType(ssh, WOLFSSH_SESSION_EXEC,
-                               (byte *)o->command,
-                               (word32)strlen(o->command)) != WS_SUCCESS) {
-        fprintf(stderr, "ssh: cannot request a command\n");
-        goto done;
+    if (o->command != NULL) {
+        if (wolfSSH_SetChannelType(ssh, WOLFSSH_SESSION_EXEC,
+                                   (byte *)o->command,
+                                   (word32)strlen(o->command)) != WS_SUCCESS) {
+            fprintf(stderr, "ssh: cannot request a command\n");
+            goto done;
+        }
+    }
+    else {
+        /* No command: ask for a shell (M5), and for a pty too when the local end
+         * has a terminal to size it from. wolfSSH builds the pty-req from the
+         * local termios settings and dereferences a failed read, so a pty-req
+         * issued from a pipe crashes it; without a tty (stdin is a pipe or a
+         * file) a plain shell is what we want anyway. */
+        byte type = WOLFSSH_SESSION_TERMINAL;
+#ifndef _WIN32
+        if (isatty(0) != 1)
+            type = WOLFSSH_SESSION_SHELL;
+#endif
+        if (wolfSSH_SetChannelType(ssh, type, NULL, 0) != WS_SUCCESS) {
+            fprintf(stderr, "ssh: cannot request an interactive session\n");
+            goto done;
+        }
     }
 
     rc = wolfSSH_connect(ssh);
@@ -443,6 +627,17 @@ static int session_run(const client_opts_t *o)
                     rc, err);
             goto done;
         }
+    }
+
+    if (o->command == NULL) {
+        /* Interactive: a pty and a shell. Pump the local terminal against the
+         * channel until one end finishes, then collect the exit status. */
+        interactive_pump(ssh, fd);
+        wolfSSH_worker(ssh, NULL);
+        status = wolfSSH_GetExitStatus(ssh);
+        if (status < 0)
+            status = 0;
+        goto done;
     }
 
     for (;;) {

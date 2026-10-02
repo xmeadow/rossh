@@ -7,9 +7,10 @@
 /*
  * The session layer: who may log in, and what happens when they run something.
  *
- * M2 scope — publickey authentication against a file, and `exec` through the
- * native process API, with stdout and stderr both forwarded and a real exit
- * status. There is no pty and no shell, by design (spec.md §4.3).
+ * M2 — publickey authentication against a file, and `exec` through the native
+ * process API, with stdout and stderr both forwarded and a real exit status.
+ * M5 — an interactive `shell`, on a pty natively and on a pipe-fed cmd.exe on
+ * Windows (see session_shell below).
  */
 
 #define KEYLIST_MAX_KEYS 32
@@ -47,5 +48,14 @@ int session_bind(WOLFSSH *ssh, const keylist_t *keys);
 /* Serves the SFTP subsystem (M3) until the connection ends. `root`, when not
  * NULL, is the jail every path is resolved against. */
 int session_sftp(WOLFSSH *ssh, const char *root);
+
+/* True once a `shell` request has arrived on the current connection. The request
+ * callback only records it; main runs the loop once wolfSSH_accept() returns. */
+int session_shell_requested(void);
+
+/* Runs the interactive shell for the current connection until it ends. `fd` is
+ * the connection socket: the loop polls it for keystrokes while draining the
+ * shell process's output. */
+int session_shell(WOLFSSH *ssh, WS_SOCKET_T fd);
 
 #endif /* ROSSH_SESSION_H */

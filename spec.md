@@ -31,10 +31,11 @@ Debian shell.
 - **Bug-for-bug compatibility.** We keep wSSH's *configuration format* and the
   observable behaviour of the two workflows above. We deliberately drop its
   algorithm set — that is the point of the exercise.
-- **Interactive PTY sessions**, in either direction. ReactOS has no ConPTY and no
-  dependable console emulation; wSSH is bad at this too (a bare interactive shell
-  executes nothing). The client therefore runs **one command per invocation** and
-  reports its exit status; there is no `ssh` prompt. See *Open questions*.
+- **Full-screen terminal programs.** ReactOS has no ConPTY, so there is no real
+  pseudo-console to hand a program that repaints the screen to. The interactive
+  shell (M5) is line-oriented on Windows and provides a prompt, echo, `cd`,
+  Ctrl-C and Ctrl-D; full-screen programs are out of reach there. On POSIX the
+  shell runs on a genuine pty (`forkpty`), so it behaves like any other `sshd`.
 - **GSSAPI, NT authentication, impersonation, FIPS mode.** Dropped, not
   postponed: they drag in the Windows token/security stack that ReactOS
   implements only partially, and none of them serve the use case.
@@ -98,7 +99,10 @@ flags.
   is a known weakness; rossh must not inherit it.
 - `env`: accepted for a small allowlist only.
 - Window handling with real flow control — no unbounded buffering of child output.
-- `shell` without a PTY: not in P0 (see *Open questions*).
+- `shell` request: an interactive session (M5). A `pty-req` is accepted and its
+  size honoured. Natively the shell runs on a real pty (`forkpty`); on Windows it
+  is a pipe-fed `cmd.exe` whose echo and line editing are done on this side (see
+  `src/session.c`).
 
 ### 4.4 SFTP (P1)
 
@@ -274,7 +278,8 @@ invocations need `%SystemRoot%\system32` prepended.
 | M4b | Service | done — `rossh --install <config>` registers it (auto-start, LocalSystem) and starts it; `--uninstall` stops and removes it. Verified on Windows 7: install, serve, `net stop`/`net start`, remove |
 | M4c | Per-user policy | keys per account, SFTP-only users |
 | M4d | Setup | done — `rossh setup [--key <pubkey>] [--port <n>] [--no-firewall] [dir]` generates the host key, writes the config, authorises a key, installs and starts the service, and opens the firewall. `make installer` wraps it in an NSIS `rossh-setup.exe`. Both verified on Windows 7: the machine answers right after, and the uninstaller removes service, rule and files |
-| M5 | Optional: tunnels | — |
+| M5 | Interactive shell: `pty-req` + `shell` | done — `ssh host` with no command gives a prompt: natively on a real pty (`forkpty`), on Windows on a pipe-fed `cmd.exe` with our own echo and line editing. Verified on ReactOS 0.4.16 with both our client and a stock OpenSSH client |
+| M6 | Optional: tunnels | — |
 
 ## 11. Risks and open questions
 
@@ -289,10 +294,11 @@ invocations need `%SystemRoot%\system32` prepended.
   (an MSVC `_sopen_s` flag). This affects only legacy `scp -O`; modern `scp`
   speaks SFTP, which is enabled. Patch it or drop it in M3.
 - **Entropy ceiling.** §6.1 is a real limitation, not a solved problem.
-- **Interactive shell.** No PTY, in either direction. Refuse `shell` outright, or
-  offer a line-based fallback? Not decided. The client ducks the question by
-  running one command per invocation — but it means `ssh` without a command has
-  nothing to do, and an interactive program is out of reach.
+- **Interactive shell — decided and done (M5).** `shell` is served on every
+  platform: a real pty via `forkpty` natively, and a pipe-fed `cmd.exe` on Windows
+  with echo and line editing done on this side. `ssh host` with no command now
+  gives a prompt. What stays out of reach on Windows is full-screen programs — see
+  §2.
 - **RSA.** Dropped in P0 (§4.1). Revisit only if a client without `ssh-ed25519`
   ever needs to connect.
 - **The SFTP root does not confine.** `wolfSSH_GetPath()` skips the default

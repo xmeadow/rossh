@@ -249,3 +249,25 @@ of wSSH and ReactOS, not of rossh.
 | `ping` is not a liveness test — ICMP is dropped even when the box is perfectly fine (100 % loss measured while port 22 answered immediately) | test the port. |
 | `tasklist` and `taskkill` exist only at `C:\ReactOS\system32\` | as with everything else, the full path. |
 | There is no `net.exe` and no `netsh` | `net start`/`net stop` and the firewall step do nothing here. Service control goes through rossh's own `--install` / `--uninstall`; `setup`'s firewall call is a harmless no-op. |
+
+## 11. The interactive shell (M5)
+
+ReactOS has no ConPTY and no dependable console emulation, so a session cannot be
+handed a real pseudo-console the way a POSIX `sshd` does with `forkpty`. What
+works here is a pipe-fed `cmd.exe`:
+
+- `cmd.exe` prints its prompt into a pipe and reads command lines from one, but it
+  does **not** echo and has no line editor without a console. So the server echoes
+  and edits the line itself and only hands `cmd.exe` a finished line.
+- `PeekNamedPipe` is not dependable enough to poll the child's output with, so the
+  blocking read lives on its own thread, filling a ring buffer the session loop
+  drains. A `shell` session is the one place the server runs a second thread.
+- A client's channel EOF does **not** end the session: the server closes `cmd.exe`'s
+  stdin and keeps draining until `cmd.exe` exits, otherwise the reply is cut off.
+  (The server is single-threaded, so a foreground test server holds port 22 for as
+  long as it runs — a detour, not a bug: kill it through its own port.)
+
+What you get is a prompt and a command loop (`cd`, `echo`, `ver`, Ctrl-C,
+Ctrl-D); full-screen programs are out of reach without a console. Verified on
+0.4.16: `ssh host` with no command gives `C:\ReactOS\System32>`, and the session
+ends cleanly on `exit`.
