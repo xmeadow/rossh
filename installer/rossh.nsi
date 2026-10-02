@@ -34,11 +34,16 @@ SetCompressor /SOLID lzma
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
+!include "nsDialogs.nsh"
+
+Var KeyEdit
+Var KeyText
 
 !define MUI_ABORTWARNING
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${ROOT}/LICENSE"
 !insertmacro MUI_PAGE_DIRECTORY
+Page custom KeyPageCreate KeyPageLeave
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 
@@ -48,6 +53,28 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "German"
 
+; Ask for the public key the operator will connect with. Without it, setup
+; generates a client key that lives on this machine — fine for a test, useless
+; for reaching the box from elsewhere. Skipped entirely in a silent install
+; (/S), which falls back to the generated key.
+Function KeyPageCreate
+    !insertmacro MUI_HEADER_TEXT "Your public key" "Paste the key you will connect with, or leave empty."
+    nsDialogs::Create 1018
+    Pop $0
+    ${If} $0 == error
+        Abort
+    ${EndIf}
+    ${NSD_CreateLabel} 0 0 100% 28u "Paste the OpenSSH public key you will connect with, one line:$\r$\nssh-ed25519 AAAA... you@laptop$\r$\nLeave it empty to have rossh generate a client key next to the config instead."
+    Pop $0
+    ${NSD_CreateText} 0 32u 100% 12u "$KeyText"
+    Pop $KeyEdit
+    nsDialogs::Show
+FunctionEnd
+
+Function KeyPageLeave
+    ${NSD_GetText} $KeyEdit $KeyText
+FunctionEnd
+
 Section "rossh" SecInstall
     SetOutPath "$INSTDIR"
     File "${ROOT}/rossh.exe"
@@ -55,10 +82,16 @@ Section "rossh" SecInstall
     File "${ROOT}/README.md"
 
     ; The whole setup, in one call: host key, rossh.conf, an authorised key,
-    ; the service (auto-start) and the firewall. With no --key it generates a
-    ; client key next to the config, so there is always a way in.
+    ; the service (auto-start) and the firewall.
     DetailPrint "Setting up rossh in $INSTDIR ..."
-    nsExec::ExecToLog '"$INSTDIR\rossh.exe" setup --port ${PORT} "$INSTDIR"'
+    ${If} $KeyText != ""
+        FileOpen $0 "$INSTDIR\mykey.pub" w
+        FileWrite $0 "$KeyText$\r$\n"
+        FileClose $0
+        nsExec::ExecToLog '"$INSTDIR\rossh.exe" setup --port ${PORT} --key "$INSTDIR\mykey.pub" "$INSTDIR"'
+    ${Else}
+        nsExec::ExecToLog '"$INSTDIR\rossh.exe" setup --port ${PORT} "$INSTDIR"'
+    ${EndIf}
     Pop $0
     ${If} $0 != 0
         ; Anything but 0 means the service could not be installed — usually
@@ -104,6 +137,7 @@ Section "Uninstall"
     Delete "$INSTDIR\authorized_keys"
     Delete "$INSTDIR\client.der"
     Delete "$INSTDIR\client.der.pub"
+    Delete "$INSTDIR\mykey.pub"
     Delete "$INSTDIR\rossh.log"
     Delete "$INSTDIR\kh"
     Delete "$INSTDIR\known_hosts"
