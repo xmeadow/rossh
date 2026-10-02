@@ -115,6 +115,36 @@ case "$out" in
         fail=1 ;;
 esac
 
+# The negotiated cipher is the client's choice, not ours: it picks the first
+# entry of its own preference list that we offer. Testing only the default
+# negotiation therefore tests one cipher — whichever the local OpenSSH happens
+# to rank highest — and says nothing about the rest of the offer. An offer the
+# backend cannot honour is invisible until a client with a different order
+# shows up. So every advertised cipher gets its own handshake, with the list
+# read back out of the server's own log so this stays in step with
+# algo_cipher in src/main.c.
+echo "=== every advertised cipher must complete a handshake ==="
+ciphers=$(sed -n 's/.*\[INFO\]   cipher   //p' "$log" | head -1 | tr ',' ' ')
+if [ -z "$ciphers" ]; then
+    echo "  FAIL: could not read the offered cipher list from the log"
+    fail=1
+fi
+for c in $ciphers; do
+    cout=$(ssh -p "$port" -c "$c" \
+             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+             -o BatchMode=yes -o ConnectTimeout=5 -o NumberOfPasswordPrompts=0 \
+             -o IdentitiesOnly=yes -i "$work/id" \
+             testuser@127.0.0.1 true 2>&1)
+    case "$cout" in
+        *"Permission denied"*)
+            echo "  ok: $c reached authentication" ;;
+        *)
+            echo "  FAIL: $c did not get as far as authentication"
+            printf '%s\n' "$cout" | grep -v '^debug' | sed 's/^/      /'
+            fail=1 ;;
+    esac
+done
+
 echo "=== server log ==="
 cat "$log"
 

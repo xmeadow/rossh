@@ -68,7 +68,7 @@ cd third_party/wolfssl
 ./configure --host=i686-w64-mingw32 \
   --prefix=/tmp/rosssh-spike/prefix \
   --enable-wolfssh --enable-curve25519 --enable-ed25519 --enable-ed25519-stream \
-  --enable-aesgcm \
+  --enable-aesgcm --enable-aesctr \
   --enable-static --disable-shared \
   --disable-examples --disable-crypttests \
   --disable-mlkem --disable-pqc-hybrids
@@ -131,7 +131,22 @@ Building the target explicitly is the way through.
    *offers* `ssh-ed25519` unless it is restricted further, while the host key is
    refused with `WS_UNIMPLEMENTED_E` (-1017) or the key exchange fails after the
    client sends `KEX_ECDH_INIT`.
-7. **The host key must be PKCS#8 DER and must carry its public half.**
+7. **`aes256-ctr` needs `--enable-aesctr`, and the symptom only shows up with
+   some clients.** `--enable-aesgcm` does not bring AES-CTR with it, but wolfSSH
+   offers `aes256-ctr` regardless, and `src/main.c` pins it as the third cipher
+   ([../spec.md](../spec.md) §4.1). The cipher is the *client's* choice — it
+   takes the first entry of its own preference list that we offer — so whether
+   this is fatal depends on which client connects. OpenSSH 10 ranks
+   `aes128-gcm` above the CTR modes and works; every OpenSSH up to 9.x, Ubuntu
+   24.04 LTS included, ranks `aes256-ctr` above both GCM modes and cannot
+   connect at all. The server dies before `SSH2_MSG_KEX_ECDH_REPLY`, and the
+   client reports either `Connection closed` or `Bad packet length` /
+   `message authentication code incorrect` — nothing that points at a missing
+   configure flag. `tools/m1-check.sh` now handshakes once per advertised
+   cipher, reading the list back out of the server's own log, so an offer the
+   backend cannot honour fails the check instead of waiting for the wrong
+   client.
+8. **The host key must be PKCS#8 DER and must carry its public half.**
    - PEM and OpenSSH-format host keys are only parsed when wolfSSH is built with
      `WOLFSSH_CERTS` (`--enable-certs`), which is X.509 support we deliberately do
      not carry. Without it `wolfSSH_ProcessBuffer` answers

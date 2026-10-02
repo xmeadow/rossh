@@ -72,8 +72,15 @@ wolfssh_cppflags="-I$shim${extra:+ $extra}"
 #   That is ~40 KB of code and imports we never call, and on ReactOS every
 #   import and relocation the loader has to resolve is a liability
 #   (docs/reactos.md section 9).
+# --enable-aesctr: without it wolfSSL has no AES-CTR, but wolfSSH still offers
+#   aes256-ctr, which src/main.c pins as the third cipher (spec.md section 4.1).
+#   A client that prefers CTR over GCM then negotiates it and the connection
+#   dies before SSH2_MSG_KEX_ECDH_REPLY. That is every OpenSSH up to 9.x,
+#   including Ubuntu 24.04 LTS, whose order puts aes256-ctr ahead of the GCM
+#   modes. Offering an algorithm the backend cannot do is the bug; this fixes
+#   the backend rather than shrinking the offer.
 wolfssl_opts="--enable-wolfssh --enable-curve25519 --enable-ed25519 \
---enable-ed25519-stream --enable-aesgcm --enable-cryptonly \
+--enable-ed25519-stream --enable-aesgcm --enable-aesctr --enable-cryptonly \
 --enable-static --disable-shared \
 --disable-examples --disable-crypttests --disable-mlkem --disable-pqc-hybrids"
 
