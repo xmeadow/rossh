@@ -39,9 +39,11 @@ SP1** both serve the handshake, `exec`, `scp` and `--genkey`. The **client** is
 likewise verified on ReactOS: run as `ssh`, it connects to a stock OpenSSH 10
 server on the LAN, runs a command and returns its exit status unchanged.
 
-**M4 is underway.** The server now reads a small `rossh.conf` (its own format,
-not wSSH's) and logs to a file and the console at a chosen level; the service and
-the installer are next.
+**M4 is underway.** The server reads a small `rossh.conf` (its own format, not
+wSSH's), logs to a file and the console at a chosen level, and installs as a
+Windows service — auto-start, running as LocalSystem, via `rossh --install
+<config>` and `rossh --uninstall`. Per-user policy and the one-shot `rossh setup`
+are next.
 
 The start-up walls that once stopped the binary from reaching `main` on ReactOS,
 and later stopped the client before its first byte, are all solved — see
@@ -66,9 +68,10 @@ tools/
   m3-check.sh            M3 check: scp without -O, and the root escape
   client-check.sh        client check: run a command, trust on first use
 src/
-  main.c                 listener, wolfSSH wiring, --genkey, ssh-mode dispatch
+  main.c, server.h       entry point, and the server loop it exposes (server_run)
   session.c, session.h   server: authentication, the exec channel, SFTP
   client.c, client.h     client: connect, authenticate, run one command
+  service.c, service.h   Windows service: install / remove / run as LocalSystem
   b64.c, b64.h           one-line base64 for .pub lines and known_hosts
   config.c, config.h     the key = value config file
   log.c, log.h           leveled logging (console + optional file)

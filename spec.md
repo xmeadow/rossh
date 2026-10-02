@@ -268,7 +268,7 @@ invocations need `%SystemRoot%\system32` prepended.
 | M3 | SFTP v3; the root is a starting directory | done — `scp` works **without** `-O`, both ways, byte for byte, on ReactOS and Windows 7; `tools/m3-check.sh` passes |
 | M3.5 | Client: `ssh [user@]host <command>` from ReactOS | done — the same binary answers to `ssh`, runs one command against our own server and against a stock OpenSSH server, and returns its exit status. `tools/client-check.sh` passes; verified on ReactOS 0.4.16 talking to OpenSSH 10 |
 | M4a | Config and logging | done — a `rossh.conf` named with `--config` sets port, bind, host key, authorised keys, SFTP root and log file/level; the command line overrides it (`src/config.c`, `src/log.c`) |
-| M4b | Service | runs under the SCM as LocalSystem, auto-start, `--install` / `--uninstall` |
+| M4b | Service | done — `rossh --install <config>` registers it (auto-start, LocalSystem) and starts it; `--uninstall` stops and removes it. Verified on Windows 7: install, serve, `net stop`/`net start`, remove |
 | M4c | Per-user policy | keys per account, SFTP-only users |
 | M4d | Setup | `rossh setup`: host key, config, service, firewall — usable without wSSH |
 | M5 | Optional: tunnels | — |

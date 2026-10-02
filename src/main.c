@@ -24,6 +24,8 @@
 #include "config.h"
 #include "log.h"
 #include "rng.h"
+#include "server.h"
+#include "service.h"
 #include "session.h"
 #include "client.h"
 
@@ -327,17 +329,174 @@ static int client_requested(int argc, char **argv)
     return 0;
 }
 
+/* ----------------------------------------------------------------- server -- */
+
+static socket_t    g_listen_fd = INVALID_SOCKET;
+static volatile int g_stop;
+
+void server_request_stop(void)
+{
+    socket_t fd = g_listen_fd;
+
+    g_stop = 1;
+    g_listen_fd = INVALID_SOCKET;
+    if (fd != INVALID_SOCKET)
+        close_socket(fd);              /* unblocks accept() */
+}
+
+int server_run(const config_t *cfg, int once)
+{
+    WOLFSSH_CTX *ctx;
+    unsigned     failures = 0;
+    int          rc;
+
+    ctx = wolfSSH_CTX_new(WOLFSSH_ENDPOINT_SERVER, NULL);
+    if (ctx == NULL) {
+        log_error("wolfSSH_CTX_new failed");
+        return 1;
+    }
+
+    session_configure(ctx);
+    wolfSSH_CTX_SetBanner(ctx, server_banner);
+
+    /* Pin the offer. A rejection here is a build problem, not a runtime one. */
+    if ((rc = wolfSSH_CTX_SetAlgoListKex(ctx, algo_kex)) < 0 ||
+        (rc = wolfSSH_CTX_SetAlgoListKey(ctx, algo_hostkey)) < 0 ||
+        (rc = wolfSSH_CTX_SetAlgoListCipher(ctx, algo_cipher)) < 0 ||
+        (rc = wolfSSH_CTX_SetAlgoListMac(ctx, algo_mac)) < 0 ||
+        (rc = wolfSSH_CTX_SetAlgoListKeyAccepted(ctx, algo_keys)) < 0) {
+        log_error("wolfSSH rejected an algorithm list (%d)", rc);
+        wolfSSH_CTX_free(ctx);
+        return 1;
+    }
+
+    if (load_host_key(ctx, cfg->host_key) != 0) {
+        wolfSSH_CTX_free(ctx);
+        return 1;
+    }
+    log_info("host key '%s' loaded", cfg->host_key);
+    trace("host key loaded");
+
+    if (cfg->authorized_keys[0] != '\0') {
+        if (keylist_load(&g_keys, cfg->authorized_keys) != 0) {
+            log_error("cannot read authorised keys '%s'", cfg->authorized_keys);
+            wolfSSH_CTX_free(ctx);
+            return 1;
+        }
+        log_info("authorised keys: %d loaded from %s",
+                 g_keys.count, cfg->authorized_keys);
+    }
+    else {
+        log_warn("no authorized_keys configured, every login is refused");
+    }
+
+    g_listen_fd = listen_on(cfg->bind, cfg->port);
+    if (g_listen_fd == INVALID_SOCKET) {
+        log_error("bind/listen failed on %s:%d (%d)",
+                  cfg->bind, cfg->port, last_socket_error());
+        wolfSSH_CTX_free(ctx);
+        return 1;
+    }
+
+    log_info("rossh listening on %s:%d", cfg->bind, cfg->port);
+    trace("listening");
+    log_info("  kex      %s", algo_kex);
+    log_info("  host key %s", algo_hostkey);
+    log_info("  cipher   %s", algo_cipher);
+    log_info("  mac      %s", algo_mac);
+
+    for (;;) {
+        struct sockaddr_in peer;
+        socklen_type       plen = sizeof peer;
+        socket_t           lfd = g_listen_fd;
+        socket_t           cfd;
+        WOLFSSH           *ssh;
+
+        if (g_stop || lfd == INVALID_SOCKET)
+            break;
+
+        cfd = accept(lfd, (struct sockaddr *)&peer, &plen);
+        if (cfd == INVALID_SOCKET) {
+            /* A server must never spin here. ReactOS is quite capable of
+             * failing accept() persistently, and a busy loop takes the whole
+             * VM down with it: the network stack stops answering, and there is
+             * no out-of-band way back in. Pause, and give up after a run of
+             * failures instead of burning the machine. */
+            if (g_stop)
+                break;
+            if (++failures == 1)
+                log_warn("accept failed (%d), backing off", last_socket_error());
+            if (failures >= 30) {
+                log_error("accept keeps failing, giving up");
+                break;
+            }
+            pause_ms(200);
+            continue;
+        }
+        failures = 0;
+        trace("connection accepted");
+
+        log_info("--- connection from %s", inet_ntoa(peer.sin_addr));
+
+        ssh = wolfSSH_new(ctx);
+        if (ssh == NULL) {
+            close_socket(cfd);
+            if (once)
+                break;
+            continue;
+        }
+        session_bind(ssh, &g_keys);
+
+        wolfSSH_set_fd(ssh, (WS_SOCKET_T)cfd);
+        rc = wolfSSH_accept(ssh);
+        log_debug("wolfSSH_accept -> %d", rc);
+
+        /* A client that asked for the sftp subsystem is handed to the SFTP
+         * server here — wolfSSH_accept() reports that with WS_SFTP_COMPLETE,
+         * having already run the version exchange. exec requests were answered
+         * by their channel callback. */
+        if (rc == WS_SFTP_COMPLETE) {
+            session_sftp(ssh, cfg->sftp_root[0] != '\0' ? cfg->sftp_root : NULL);
+        }
+
+        /* Close the session properly. Without this the socket is dropped as
+         * soon as accept() returns, and the client sees a connection reset
+         * instead of its exit status. */
+        for (;;) {
+            rc = wolfSSH_shutdown(ssh);
+            if (rc != WS_WANT_READ && rc != WS_WANT_WRITE)
+                break;
+        }
+        log_debug("wolfSSH_shutdown -> %d", rc);
+
+        wolfSSH_free(ssh);
+        close_socket(cfd);
+
+        if (once)
+            break;
+    }
+
+    trace("exiting");
+    if (g_listen_fd != INVALID_SOCKET) {
+        close_socket(g_listen_fd);
+        g_listen_fd = INVALID_SOCKET;
+    }
+    wolfSSH_CTX_free(ctx);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     config_t     cfg;
     int          once = 0;                  /* --once: serve one connection, then exit */
+    int          service_mode = 0;          /* the service controller's child */
+    int          install_mode = 0;
+    int          uninstall_mode = 0;
     const char  *genkey_path = NULL;
     const char  *port_arg = NULL;
     const char  *key_arg  = NULL;
     const char  *config_path = NULL;
     int          i;
-    WOLFSSH_CTX *ctx;
-    socket_t     lfd;
     int          rc;
 
     /* `ssh': the same binary wearing the other hat. Decided here — before the
@@ -394,6 +553,15 @@ int main(int argc, char **argv)
             snprintf(cfg.sftp_root, sizeof cfg.sftp_root, "%s", argv[++i]);
         else if (strcmp(argv[i], "--once") == 0)
             once = 1;
+        else if (strcmp(argv[i], "--service") == 0)
+            service_mode = 1;
+        else if (strcmp(argv[i], "--install") == 0) {
+            install_mode = 1;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                config_path = argv[++i];
+        }
+        else if (strcmp(argv[i], "--uninstall") == 0)
+            uninstall_mode = 1;
         else if (argv[i][0] != '-' && port_arg == NULL)
             port_arg = argv[i];
         else if (argv[i][0] != '-' && key_arg == NULL)
@@ -414,6 +582,12 @@ int main(int argc, char **argv)
     if (key_arg != NULL)
         snprintf(cfg.host_key, sizeof cfg.host_key, "%s", key_arg);
     trace("args parsed");
+
+    if (install_mode || uninstall_mode) {
+        if (install_mode)
+            return service_install(config_path);
+        return service_uninstall();
+    }
 
 #ifdef _WIN32
     {
@@ -440,127 +614,8 @@ int main(int argc, char **argv)
         return (rc == 0) ? 0 : 1;
     }
 
-    ctx = wolfSSH_CTX_new(WOLFSSH_ENDPOINT_SERVER, NULL);
-    if (ctx == NULL) {
-        log_error("wolfSSH_CTX_new failed");
-        return 1;
-    }
+    if (service_mode)
+        return service_run(config_path);
 
-    session_configure(ctx);
-    wolfSSH_CTX_SetBanner(ctx, server_banner);
-
-    /* Pin the offer. A rejection here is a build problem, not a runtime one. */
-    if ((rc = wolfSSH_CTX_SetAlgoListKex(ctx, algo_kex)) < 0 ||
-        (rc = wolfSSH_CTX_SetAlgoListKey(ctx, algo_hostkey)) < 0 ||
-        (rc = wolfSSH_CTX_SetAlgoListCipher(ctx, algo_cipher)) < 0 ||
-        (rc = wolfSSH_CTX_SetAlgoListMac(ctx, algo_mac)) < 0 ||
-        (rc = wolfSSH_CTX_SetAlgoListKeyAccepted(ctx, algo_keys)) < 0) {
-        fprintf(stderr, "rossh: wolfSSH rejected an algorithm list (%d)\n", rc);
-        return 1;
-    }
-
-    if (load_host_key(ctx, cfg.host_key) != 0)
-        return 1;
-    log_info("host key '%s' loaded", cfg.host_key);
-    trace("host key loaded");
-
-    if (cfg.authorized_keys[0] != '\0') {
-        if (keylist_load(&g_keys, cfg.authorized_keys) != 0) {
-            log_error("cannot read authorised keys '%s'", cfg.authorized_keys);
-            return 1;
-        }
-        log_info("authorised keys: %d loaded from %s",
-                 g_keys.count, cfg.authorized_keys);
-    }
-    else {
-        log_warn("no authorized_keys configured, every login is refused");
-    }
-
-    lfd = listen_on(cfg.bind, cfg.port);
-    if (lfd == INVALID_SOCKET) {
-        log_error("bind/listen failed on %s:%d (%d)",
-                  cfg.bind, cfg.port, last_socket_error());
-        return 1;
-    }
-
-    log_info("rossh listening on %s:%d", cfg.bind, cfg.port);
-    trace("listening");
-    log_info("  kex      %s", algo_kex);
-    log_info("  host key %s", algo_hostkey);
-    log_info("  cipher   %s", algo_cipher);
-    log_info("  mac      %s", algo_mac);
-
-    {
-        unsigned failures = 0;
-
-        for (;;) {
-            struct sockaddr_in peer;
-            socklen_type       plen = sizeof peer;
-            socket_t           cfd;
-            WOLFSSH           *ssh;
-
-            cfd = accept(lfd, (struct sockaddr *)&peer, &plen);
-            if (cfd == INVALID_SOCKET) {
-                /* A server must never spin here. ReactOS is quite capable of
-                 * failing accept() persistently, and a busy loop takes the whole
-                 * VM down with it: the network stack stops answering, and there
-                 * is no out-of-band way back in. Pause, and give up after a run
-                 * of failures instead of burning the machine. */
-                if (++failures == 1)
-                    log_warn("accept failed (%d), backing off",
-                             last_socket_error());
-                if (failures >= 30) {
-                    log_error("accept keeps failing, giving up");
-                    break;
-                }
-                pause_ms(200);
-                continue;
-            }
-            failures = 0;
-            trace("connection accepted");
-
-            log_info("--- connection from %s", inet_ntoa(peer.sin_addr));
-
-            ssh = wolfSSH_new(ctx);
-            if (ssh == NULL) {
-                close_socket(cfd);
-                if (once)
-                    break;
-                continue;
-            }
-            session_bind(ssh, &g_keys);
-
-            wolfSSH_set_fd(ssh, (WS_SOCKET_T)cfd);
-            rc = wolfSSH_accept(ssh);
-            log_debug("wolfSSH_accept -> %d", rc);
-
-            /* A client that asked for the sftp subsystem is handed to the SFTP
-             * server here — wolfSSH_accept() reports that with WS_SFTP_COMPLETE,
-             * having already run the version exchange. exec requests were
-             * answered by their channel callback. */
-            if (rc == WS_SFTP_COMPLETE) {
-                session_sftp(ssh, cfg.sftp_root[0] != '\0' ? cfg.sftp_root : NULL);
-            }
-
-            /* Close the session properly. Without this the socket is dropped as
-             * soon as accept() returns, and the client sees a connection reset
-             * instead of its exit status. */
-            for (;;) {
-                rc = wolfSSH_shutdown(ssh);
-                if (rc != WS_WANT_READ && rc != WS_WANT_WRITE)
-                    break;
-            }
-            log_debug("wolfSSH_shutdown -> %d", rc);
-
-            wolfSSH_free(ssh);
-            close_socket(cfd);
-
-            if (once)
-                break;
-        }
-    }
-
-    trace("exiting");
-    close_socket(lfd);
-    return 0;
+    return server_run(&cfg, once);
 }
