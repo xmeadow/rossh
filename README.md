@@ -1,120 +1,192 @@
 # rossh
 
-An SSH server **and client** for **ReactOS**, written in **C** and built with
-mingw-w64, on top of [wolfSSH](docs/alternatives.md) — which makes the project
-**GPLv3** (see [Licence](#licence)).
+**An SSH server and client for ReactOS and older Windows.** One static
+executable, no runtime to install, and any stock SSH client connects to it
+without special options.
 
-It replaces [wSSH](docs/wssh.md), the only SSH server that has ever worked on
-ReactOS — closed source, unmaintained since 2016, and cryptographically broken on
-this platform.
+Verified on ReactOS 0.4.16 and Windows 7 SP1. The name is short for *ReactOS
+SSH*, but it is compiled against the NT 4.0 subsystem and runs across the older
+Windows family.
 
-The repository directory is `rssh`; the project is `rossh` (ReactOS SSH).
+## What it is
 
-## Why replace wSSH
+SSH is how you use another machine over the network as if you were sitting at
+it: run a command, copy a file, open a shell. Linux and macOS ship it. ReactOS
+and older Windows have had nothing current that does.
 
-Not because it is old — because it is unsafe in ways that cannot be patched:
+rossh is one small program carrying both halves:
 
-| Problem                     | Evidence                                                    |
-| --------------------------- | ----------------------------------------------------------- |
-| Crypto from 2009            | statically linked **OpenSSL 0.9.8j** inside `wodSSHD.dll`    |
-| SHA-1 forced                | offers only `ssh-rsa`/`ssh-dss` and DH group1/14, no `rsa-sha2-*` |
-| Integrity can be disabled   | offers **`none`** as a MAC                                    |
-| Predictable key material    | its only entropy source is ReactOS' `CryptGenRandom`, which is a tick-count-seeded LCG — the ReactOS source says so itself |
-| Closed source               | the SSH engine is a commercial DLL; the shipped glue source has its licence key stripped |
-
-Details and the raw measurements: [docs/wssh.md](docs/wssh.md).
-
-## Status
-
-**M3 is done, and the client works.** A stock OpenSSH client negotiates the
-modern suite of [spec.md](spec.md) §4.1 with **no `-o` flags at all**,
-authenticates with its publickey, **runs a command** — stdout comes back and the
-exit status is passed through unchanged — and **transfers files** with `scp`
-(modern, without `-O`) byte for byte, both directions. The same binary also runs
-as **`ssh`**, so the ReactOS box can itself do `ssh user@host <command>`.
-
-This is verified on **Linux** (`tools/m1-check.sh`, `m2-check.sh`, `m3-check.sh`,
-`client-check.sh`) and on the real targets: **ReactOS 0.4.16** and **Windows 7
-SP1** both serve the handshake, `exec`, `scp` and `--genkey`. The **client** is
-likewise verified on ReactOS: run as `ssh`, it connects to a stock OpenSSH 10
-server on the LAN, runs a command and returns its exit status unchanged.
-
-**M4 is nearly done.** The server reads a small `rossh.conf` (its own format,
-not wSSH's), logs to a file and the console at a chosen level, installs as a
-Windows service (auto-start, LocalSystem), and `rossh setup` does all of it in
-one step — host key, config, an authorised key, the service, the firewall — so
-the machine answers right after. Per-user policy is still to come.
-
-**M5 gives an interactive shell.** `ssh host` with no command now opens a
-session with a prompt. Natively the shell runs on a real pty (`forkpty`); on
-Windows and ReactOS it is a pipe-fed `cmd.exe` with echo and line editing done
-on this side — there is no ConPTY there, so a prompt and a command loop are what
-you get, not full-screen programs. Verified on ReactOS 0.4.16 with both our own
-client and a stock OpenSSH client.
-
-The start-up walls that once stopped the binary from reaching `main` on ReactOS,
-and later stopped the client before its first byte, are all solved — see
-[docs/reactos.md](docs/reactos.md) §9, §9.1 and §9.2. `make win32` produces a
-32-bit `rossh.exe` importing only `ADVAPI32`, `CRYPT32`, `KERNEL32`, `msvcrt` and
-`WS2_32`, at subsystem 4.0: no UCRT, no `vcruntime`, no `bcrypt`.
-
-## Layout
-
-```
-spec.md                  what rossh must be and do
-docs/
-  wssh.md                the system being replaced — behaviour, config, quirks
-  reactos.md             platform constraints, each with its evidence
-  alternatives.md        routes evaluated, and why this one was chosen
-  build.md               the verified cross-build recipe, and its workarounds
-tools/
-  build-deps.sh          build the pinned wolfSSL/wolfSSH for one flavor
-  probe/kexinit.py       read the peer's algorithm offer, unauthenticated
-  m1-check.sh            M1 check: the offer, and flag-free authentication
-  m2-check.sh            M2 check: authorised key, refused key, exec
-  m3-check.sh            M3 check: scp without -O, and the root escape
-  client-check.sh        client check: run a command, trust on first use
-src/
-  main.c, server.h       entry point, and the server loop it exposes (server_run)
-  session.c, session.h   server: authentication, the exec channel, SFTP
-  client.c, client.h     client: connect, authenticate, run one command
-  service.c, service.h   Windows service: install / remove / run as LocalSystem
-  setup.c, setup.h       `rossh setup`: host key, config, key, service, firewall
-  hostkey.c, hostkey.h   ed25519 key creation (--genkey and setup)
-  b64.c, b64.h           one-line base64 for .pub lines and known_hosts
-  config.c, config.h     the key = value config file
-  log.c, log.h           leveled logging (console + optional file)
-  rng.c, rng.h           the entropy pool
-Makefile                 make (native) · make win32 (ReactOS) · make installer
-installer/rossh.nsi      NSIS script behind rossh-setup.exe
-third_party/             wolfSSL + wolfSSH, pinned submodules
-```
-
-## Build
-
-Mirroring the sibling project `igor`:
+- **Server** — run it on the ReactOS or Windows machine and `ssh` in from
+  whatever client you already use (OpenSSH, PuTTY, …). Public-key
+  authentication, modern key exchange and ciphers, `exec`, `scp`/SFTP, and an
+  interactive shell.
+- **Client** — on that machine, `ssh user@host <command>` and interactive
+  sessions work the way they do on Linux, so the box can also reach out.
 
 ```sh
-make            # native build (Linux) — the dev/test loop
-make win32      # 32-bit Win32 .exe for ReactOS
-make installer  # rossh-setup.exe — needs makensis (NSIS), runs on Linux
+ssh  user@reactos-box "dir C:\"             # run one command
+scp  notes.txt user@reactos-box:/notes.txt  # copy a file (to C:\notes.txt)
+ssh  user@reactos-box                       # open a shell
 ```
 
-`i686-w64-mingw32-gcc`, statically linked, no external runtime dependency. The
-vendored libraries already cross-compile — see [docs/build.md](docs/build.md) for
-the working recipe, including the four upstream workarounds it needs.
+It runs as an auto-start Windows service, and `rossh-setup.exe` sets all of that
+up in one step.
+
+## Installing
+
+The Windows installer does everything at once — host key, config, an authorised
+key, the service and the firewall:
+
+```
+rossh-setup.exe
+```
+
+It installs to `C:\Program Files\rossh`, registers an auto-start service running
+as `LocalSystem`, and asks for the public key to authorise and the port to
+listen on (22 by default). The same work can be done from a console:
+
+```
+rossh setup [--key <public-key-file>] [--port <n>] [--no-firewall] [dir]
+```
+
+`--key` authorises the keys in that file; without it, setup generates a client
+key next to the config. On ReactOS the firewall step is a no-op (there is no
+`netsh`); the service is still registered.
+
+## Using it
+
+The three commands above are the whole server-side story. `exec` passes back the
+real exit status, and `scp`/SFTP paths are rooted at `C:\`.
+
+The same binary is the client. Rename or copy it to `ssh`, or pass `--client`:
+
+```
+ssh -i mykey.der user@host "ver"
+ssh -i mykey.der user@host
+```
+
+Keys are ed25519 in PKCS#8 DER; `rossh --genkey <path>` writes a private key and
+its `.pub`. The client remembers host keys in a `known_hosts` file on first use;
+`--insecure` skips verification.
+
+## Cryptography
+
+Only modern algorithms, pinned:
+
+| | |
+| --- | --- |
+| Key exchange | `curve25519-sha256` |
+| Host key | `ssh-ed25519` |
+| Ciphers | `aes256-gcm@openssh.com`, `aes128-gcm@openssh.com`, `aes256-ctr` |
+| MAC | `hmac-sha2-256` |
+| Client keys | `ssh-ed25519` |
+
+No RSA host keys, no SHA-1, no compression, no unauthenticated MACs. The program
+pools its own entropy rather than trusting the platform, because ReactOS' system
+RNG is a tick-count-seeded generator; [`spec.md`](spec.md) §6 has that design and
+its limits.
+
+## Configuration
+
+The server reads a small `key = value` file when one is named with `--config`;
+without it, the built-in defaults stand.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `port` | `2222` | listen port |
+| `bind` | `127.0.0.1` | listen address |
+| `host_key` | `rossh_hostkey.der` | ed25519 private key |
+| `authorized_keys` | *(none)* | one public key per line; empty refuses every login |
+| `sftp_root` | *(none)* | starting directory for SFTP; empty disables it |
+| `log_file` | *(none)* | append logs here; empty means the console |
+| `log_level` | `info` | `error`, `warn`, `info`, `debug` |
+
+```ini
+port            = 22
+bind            = 0.0.0.0
+host_key        = C:\Program Files\rossh\hostkey.der
+authorized_keys = C:\Program Files\rossh\authorized_keys
+sftp_root       = C:\Program Files\rossh
+log_file        = C:\Program Files\rossh\rossh.log
+log_level       = info
+```
+
+Precedence is defaults, then the file, then the command line. Unknown keys and
+bad values are reported and skipped, never fatal. `authorized_keys` is re-read on
+every connection, so adding or removing a key takes effect on the next login.
+
+### Command line
+
+```
+rossh [--config <file>] [--bind <addr>] [--authorized-keys <file>]
+      [--sftp-root <dir>] [--once] [<port> <host-key>]
+rossh setup [--key <file>] [--port <n>] [--no-firewall] [dir]
+rossh --install [config] | --uninstall | --service
+rossh --genkey <path>
+ssh   [-p port] [-i key] [-l user] [--known-hosts file] [--insecure] [-v]
+      [user@]host [command]
+```
+
+## Limitations
+
+- The **SFTP root is a starting directory, not a jail.** wolfSSH resolves a
+  relative path against it but not an absolute one, and `..` is handled
+  lexically. Do not rely on it as a security boundary.
+- **Authentication is by key only, and the user name is not checked** — any name
+  is accepted as long as the key is authorised. Per-user policy is not
+  implemented.
+- The server handles **one session at a time**.
+- On Windows and ReactOS the **interactive shell is line-oriented**: a prompt and
+  a command loop, with echo and editing done by the server. There is no ConPTY
+  there, so full-screen programs are out of scope. On Linux the shell runs on a
+  real pty and behaves normally.
+- No RSA, no compression, no port forwarding.
+- A session ends when the connection closes, not with a fully clean SSH
+  disconnect.
+
+## Building
+
+```sh
+make            # native (Linux) — the development and test build
+make win32      # 32-bit rossh.exe for ReactOS and Windows
+make installer  # rossh-setup.exe (needs makensis / NSIS)
+```
+
+The Windows build needs `i686-w64-mingw32-gcc`. The vendored wolfSSL and wolfSSH
+are built out-of-tree by `tools/build-deps.sh`; the recipe and its workarounds
+are in [`docs/build.md`](docs/build.md).
+
+## Repository layout
+
+```
+spec.md                what rossh must be and do, and the decisions behind it
+docs/
+  wssh.md              the system being replaced — behaviour, config, quirks
+  reactos.md           platform constraints, each with its evidence
+  alternatives.md      the routes evaluated, and why this one was chosen
+  build.md             the verified cross-build recipe and its workarounds
+src/                   the program: main, session, client, service, setup, …
+installer/rossh.nsi    the NSIS script behind rossh-setup.exe
+tools/                 build-deps.sh and the check scripts (m1/m2/m3/client)
+third_party/           wolfSSL + wolfSSH, pinned submodules
+```
+
+## Background
+
+Before this, reaching a ReactOS box over SSH meant **wSSH**: closed source,
+abandoned in 2016, and offering cryptography from 2009 that current clients
+reject. I pulled it out of the Wayback Machine and it still worked, surprisingly
+well for something almost twenty years old — just not something you can trust or
+keep. Microsoft's Win32-OpenSSH is no help either, because `sshd.exe` imports
+`inet_pton`, which ReactOS' `ws2_32.dll` does not export, so the process fails at
+load time ([`docs/alternatives.md`](docs/alternatives.md)).
+
+So rossh takes wSSH's behaviour as its specification
+([`docs/wssh.md`](docs/wssh.md)) and none of its code, and adds the client wSSH
+never had. Thanks, wSSH — you were the spark. :)
 
 ## Licence
 
-**GPLv3.** Not a preference: wolfSSH is "either licensed for use under the GPLv3
-or a standard commercial license", and linking it makes the copyleft apply to the
-project as a whole. Anyone embedding rossh must publish their changes; a
-commercial wolfSSL licence is the alternative if that ever becomes a problem.
-
-## Dependencies
-
-This project knowingly breaks with the "dependency-free" stance of its sibling
-`igor`: the SSH protocol and the cryptography come from vendored wolfSSL and
-wolfSSH. That buys a proven, actively maintained implementation and removes the
-highest-risk part of the work. What stays ours is the platform layer — and that is
-precisely the part no library can supply, because it is where ReactOS differs.
+**GPLv3**, because wolfSSH is licensed either GPLv3 or commercially, and linking
+it makes the copyleft cover the whole program. If you embed rossh, you must
+publish your changes; a commercial wolfSSL licence is the alternative.
