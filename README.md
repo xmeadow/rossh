@@ -1,8 +1,8 @@
 # rossh
 
-An SSH server for **ReactOS**, written in **C** and built with mingw-w64, on top
-of [wolfSSH](docs/alternatives.md) — which makes the project **GPLv3** (see
-[Licence](#licence)).
+An SSH server **and client** for **ReactOS**, written in **C** and built with
+mingw-w64, on top of [wolfSSH](docs/alternatives.md) — which makes the project
+**GPLv3** (see [Licence](#licence)).
 
 It replaces [wSSH](docs/wssh.md), the only SSH server that has ever worked on
 ReactOS — closed source, unmaintained since 2016, and cryptographically broken on
@@ -26,15 +26,20 @@ Details and the raw measurements: [docs/wssh.md](docs/wssh.md).
 
 ## Status
 
-**M2 is done.** A stock OpenSSH client negotiates the modern suite of
-[spec.md](spec.md) §4.1 with **no `-o` flags at all**, authenticates with its
-publickey, and **runs a command**: stdout comes back and the exit status is
-passed through unchanged. `tools/m1-check.sh` and `tools/m2-check.sh` verify both.
+**M3 is done, and the client works.** A stock OpenSSH client negotiates the
+modern suite of [spec.md](spec.md) §4.1 with **no `-o` flags at all**,
+authenticates with its publickey, **runs a command** — stdout comes back and the
+exit status is passed through unchanged — and **transfers files** with `scp`
+(modern, without `-O`) byte for byte, both directions. The same binary also runs
+as **`ssh`**, so the ReactOS box can itself do `ssh user@host <command>`.
 
-All of that is verified **natively**. On ReactOS the binary currently does not
-reach `main` at all — see [docs/reactos.md](docs/reactos.md) §9. `make win32` does
-produce a 32-bit `rossh.exe` importing only `ADVAPI32`, `CRYPT32`, `KERNEL32`,
-`msvcrt` and `WS2_32`, at subsystem 4.0: no UCRT, no `vcruntime`, no `bcrypt`.
+This is verified on **Linux** (`tools/m1-check.sh`, `m2-check.sh`, `m3-check.sh`,
+`client-check.sh`) and on the real targets: **ReactOS 0.4.16** and **Windows 7
+SP1** both serve the handshake, `exec`, `scp` and `--genkey`. The start-up wall
+that once stopped the binary from reaching `main` on ReactOS is solved — see
+[docs/reactos.md](docs/reactos.md) §9 and §9.1. `make win32` produces a 32-bit
+`rossh.exe` importing only `ADVAPI32`, `CRYPT32`, `KERNEL32`, `msvcrt` and
+`WS2_32`, at subsystem 4.0: no UCRT, no `vcruntime`, no `bcrypt`.
 
 ## Layout
 
@@ -50,9 +55,13 @@ tools/
   probe/kexinit.py       read the peer's algorithm offer, unauthenticated
   m1-check.sh            M1 check: the offer, and flag-free authentication
   m2-check.sh            M2 check: authorised key, refused key, exec
+  m3-check.sh            M3 check: scp without -O, and the root escape
+  client-check.sh        client check: run a command, trust on first use
 src/
-  main.c                 listener, wolfSSH wiring, --genkey, --trace
-  session.c, session.h   authentication and the exec channel
+  main.c                 listener, wolfSSH wiring, --genkey, ssh-mode dispatch
+  session.c, session.h   server: authentication, the exec channel, SFTP
+  client.c, client.h     client: connect, authenticate, run one command
+  b64.c, b64.h           one-line base64 for .pub lines and known_hosts
   rng.c, rng.h           the entropy pool
 Makefile                 make (native) · make win32 (ReactOS)
 third_party/             wolfSSL + wolfSSH, pinned submodules
@@ -60,7 +69,7 @@ third_party/             wolfSSL + wolfSSH, pinned submodules
 
 ## Build
 
-Planned, mirroring the sibling project `igor`:
+Mirroring the sibling project `igor`:
 
 ```sh
 make            # native build (Linux) — the dev/test loop

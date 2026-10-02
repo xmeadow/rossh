@@ -1,13 +1,15 @@
 /*
- * rossh — an SSH server for ReactOS.
+ * rossh — an SSH server and client for ReactOS.
  *
- * M1 scope: offer the modern algorithm suite from spec.md §4.1, carry a client
- * all the way through key exchange, and then refuse every authentication on
- * purpose. Serving a session is M2. Only the loopback interface is bound, so
- * nothing is exposed while the pieces are still coming together.
+ * Server mode binds a listener, offers the modern suite of spec.md §4.1, and
+ * serves one session at a time: publickey auth, `exec`, and the SFTP subsystem.
+ * Client mode — entered when the program is invoked as `ssh`, or with --client —
+ * connects out and runs one command. Both live in this one binary; see
+ * src/client.c.
  */
 
 #include <wolfssl/options.h>
+#include <wolfssl/wolfcrypt/coding.h>
 #include <wolfssh/ssh.h>
 #include <wolfssl/wolfcrypt/ed25519.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
@@ -18,8 +20,10 @@
 #include <string.h>
 #include <time.h>
 
+#include "b64.h"
 #include "rng.h"
 #include "session.h"
+#include "client.h"
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -106,6 +110,55 @@ static int load_host_key(WOLFSSH_CTX *ctx, const char *path)
 }
 
 /*
+ * Write `<path>.pub`, the OpenSSH one-line form of an ed25519 key's public half.
+ *
+ * The wire form of that half is: string "ssh-ed25519", then string key — the
+ * very blob a client offers and that authorized_keys carries, so one encoding
+ * serves both ends and no other tool is needed to move a key between them.
+ */
+static int write_public_line(const ed25519_key *key, const char *path)
+{
+    byte   blob[64];
+    byte   b64[128];
+    byte   pub[ED25519_PUB_KEY_SIZE];
+    word32 pubSz = (word32)sizeof pub;
+    word32 idx   = 0;
+    int    b64Sz;
+    char   pub_path[512];
+    FILE  *f;
+
+    if (wc_ed25519_export_public(key, pub, &pubSz) != 0)
+        return -1;
+
+    blob[idx++] = 0;
+    blob[idx++] = 0;
+    blob[idx++] = 0;
+    blob[idx++] = 11;
+    memcpy(blob + idx, "ssh-ed25519", 11);
+    idx += 11;
+    blob[idx++] = 0;
+    blob[idx++] = 0;
+    blob[idx++] = 0;
+    blob[idx++] = (byte)pubSz;
+    memcpy(blob + idx, pub, pubSz);
+    idx += pubSz;
+
+    b64Sz = b64_encode_nl(blob, idx, (char *)b64, sizeof b64);
+    if (b64Sz < 0)
+        return -1;
+
+    snprintf(pub_path, sizeof pub_path, "%s.pub", path);
+    f = fopen(pub_path, "w");
+    if (f == NULL)
+        return -1;
+    fprintf(f, "ssh-ed25519 %s rossh\n", (const char *)b64);
+    fclose(f);
+
+    printf("wrote the public half to %s\n", pub_path);
+    return 0;
+}
+
+/*
  * Create a host key. rossh owns this because the target has neither openssl nor
  * ssh-keygen.
  *
@@ -157,6 +210,7 @@ static int generate_host_key(const char *path)
     }
     fclose(f);
     printf("wrote a %d-byte ed25519 host key to %s\n", derSz, path);
+    write_public_line(&key, path);
 
 done:
     wc_ed25519_free(&key);
@@ -247,6 +301,33 @@ static void trace_open(const char *path)
         trace("trace open");
 }
 
+/* Are we `ssh`? True when the program name says so — which is why shipping the
+ * same binary as ssh.exe is enough — or when --client was asked for. */
+static int is_ssh_invocation(const char *argv0)
+{
+    const char *base = argv0;
+    const char *p;
+
+    for (p = argv0; *p != '\0'; p++) {
+        if (*p == '/' || *p == '\\')
+            base = p + 1;
+    }
+    return (base[0] == 's' || base[0] == 'S') &&
+           (base[1] == 's' || base[1] == 'S') &&
+           (base[2] == 'h' || base[2] == 'H');
+}
+
+static int client_requested(int argc, char **argv)
+{
+    int i;
+
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--client") == 0)
+            return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     int          port = DEFAULT_PORT;
@@ -262,6 +343,12 @@ int main(int argc, char **argv)
     WOLFSSH_CTX *ctx;
     socket_t     lfd;
     int          rc;
+
+    /* `ssh': the same binary wearing the other hat. Decided here — before the
+     * stream fiddling below, because folding stderr into stdout is a server
+     * workaround and exactly wrong for a client. */
+    if (is_ssh_invocation(argv[0]) || client_requested(argc, argv))
+        return client_main(argc, argv);
 
     /* Line-wise output, and everything on one stream: wSSH's exec forwards
      * stdout and not stderr, and an error nobody can see is worse than one on

@@ -1,6 +1,6 @@
 # rossh — specification
 
-An SSH-2 server for ReactOS, in C, built with mingw-w64 for Win32.
+An SSH-2 server and client for ReactOS, in C, built with mingw-w64 for Win32.
 
 Status: draft. The scope marking (P0–P3) is meant to be binding; everything
 under *Open questions* is not yet decided.
@@ -19,14 +19,22 @@ two workflows that exist today keep working unchanged:
 
 Success is measured against those two, not against feature parity with wSSH.
 
+Both of those are the *server* direction — a Linux box driving the ReactOS
+machine. The same binary also carries a **client**, so ReactOS can be the one
+that initiates: `ssh user@host <command>` from a ReactOS `cmd`, the way it is
+typed on any Linux machine. That direction existed nowhere in the wSSH era, and
+it is the other half of the stated goal that the ReactOS shell feel like a
+Debian shell.
+
 ## 2. Non-goals
 
 - **Bug-for-bug compatibility.** We keep wSSH's *configuration format* and the
   observable behaviour of the two workflows above. We deliberately drop its
   algorithm set — that is the point of the exercise.
-- **Interactive PTY sessions.** ReactOS has no ConPTY and no dependable console
-  emulation; wSSH is bad at this too (a bare interactive shell executes nothing).
-  See *Open questions*.
+- **Interactive PTY sessions**, in either direction. ReactOS has no ConPTY and no
+  dependable console emulation; wSSH is bad at this too (a bare interactive shell
+  executes nothing). The client therefore runs **one command per invocation** and
+  reports its exit status; there is no `ssh` prompt. See *Open questions*.
 - **GSSAPI, NT authentication, impersonation, FIPS mode.** Dropped, not
   postponed: they drag in the Windows token/security stack that ReactOS
   implements only partially, and none of them serve the use case.
@@ -188,8 +196,10 @@ channels, and the SFTP *protocol*. What is left is ours:
 
 | Module                 | Responsibility |
 | ---------------------- | -------------- |
-| `src/main.c`           | command line and service entry point |
+| `src/main.c`           | command line and service entry point; `--genkey`; dispatches `ssh` mode |
 | `src/session.c`        | the server: wolfSSH callbacks, `exec` via `CreateProcess` + pipes, exit status |
+| `src/client.c`         | the client: connect, verify the host key (trust on first use), authenticate, run one command, report its exit status |
+| `src/b64.c`            | one-line base64 for `.pub` lines and `known_hosts` entries |
 | `src/policy.c`         | ini parsing (wSSH-compatible), host filters, user lookup, permission flags |
 | `src/rng.c`            | the entropy pool (§6.1), wired into wolfCrypt's seed callback |
 | `src/sftp_backend.c`   | Win32 file access behind the SFTP/SCP protocol layer (P1) |
@@ -224,11 +234,12 @@ invocations need `%SystemRoot%\system32` prepended.
 
 - **Algorithm offer:** `tools/probe/kexinit.py` against the legacy wSSH and
   against rossh, to show the offer actually changed. Unauthenticated by design.
-- **Milestone checks:** `tools/m1-check.sh` and `tools/m2-check.sh` start the
-  server on a spare port and assert the criteria of their milestone — the offer
-  and flag-free authentication for M1; an authorised key, a refused key, and
-  `exec` with its exit status for M2. Extend them per milestone rather than
-  relying on manual runs.
+- **Milestone checks:** `tools/m1-check.sh`, `tools/m2-check.sh` and
+  `tools/m3-check.sh` start the server on a spare port and assert the criteria of
+  their milestone — the offer and flag-free authentication for M1; an authorised
+  key, a refused key, and `exec` with its exit status for M2; `scp` without `-O`
+  for M3. `tools/client-check.sh` exercises the client against our own server.
+  Extend them per milestone rather than relying on manual runs.
 - **Protocol regression:** saved `ssh -vvv` transcripts as fixtures.
 - **Integration:** the Igor deploy loop — `deploy.sh` must work unchanged, minus
   the `-o` flags.
@@ -245,8 +256,9 @@ invocations need `%SystemRoot%\system32` prepended.
 | M0 | Recon: behaviour corpus, platform facts, alternatives evaluated, wolfSSH cross-build validated | done — `docs/` and `docs/build.md` |
 | M1 | Vendored build wired in; wolfCrypt's RNG redirected to our pool; offer `curve25519-sha256` + `ssh-ed25519` + `aes256-gcm` | done — `tools/m1-check.sh` passes: the offer is exactly §4.1, and a stock client negotiates `curve25519-sha256`/`ssh-ed25519`/`aes128-gcm@openssh.com` with no `-o` flags and is refused at authentication |
 | M2 | Authentication + exec channel | done — `tools/m2-check.sh` passes: an authorised key logs in, an unauthorised one is refused, and `exec` returns stdout and the command's exit status unchanged |
-| M3 | SFTP v3; the root is a starting directory | `scp` works **without** `-O`, both ways, byte for byte — `tools/m3-check.sh` passes |
-| M4 | Service, ini compatibility, logging | runs as a service next to wSSH, config parses wSSH files |
+| M3 | SFTP v3; the root is a starting directory | done — `scp` works **without** `-O`, both ways, byte for byte, on ReactOS and Windows 7; `tools/m3-check.sh` passes |
+| M3.5 | Client: `ssh [user@]host <command>` from ReactOS | the same binary answers to `ssh` and runs one command against our own server, returning its exit status — `tools/client-check.sh` passes |
+| M4 | Service, config, logging | runs as a service next to wSSH, with per-user policy |
 | M5 | Optional: tunnels | — |
 
 ## 11. Risks and open questions
@@ -262,8 +274,10 @@ invocations need `%SystemRoot%\system32` prepended.
   (an MSVC `_sopen_s` flag). This affects only legacy `scp -O`; modern `scp`
   speaks SFTP, which is enabled. Patch it or drop it in M3.
 - **Entropy ceiling.** §6.1 is a real limitation, not a solved problem.
-- **Interactive shell.** No PTY. Refuse `shell` outright, or offer a line-based
-  fallback? Not decided.
+- **Interactive shell.** No PTY, in either direction. Refuse `shell` outright, or
+  offer a line-based fallback? Not decided. The client ducks the question by
+  running one command per invocation — but it means `ssh` without a command has
+  nothing to do, and an interactive program is out of reach.
 - **RSA.** Dropped in P0 (§4.1). Revisit only if a client without `ssh-ed25519`
   ever needs to connect.
 - **The SFTP root does not confine.** `wolfSSH_GetPath()` skips the default
@@ -280,8 +294,17 @@ invocations need `%SystemRoot%\system32` prepended.
   needs a gentler teardown (let the client close first) rather than a one-liner.
 - **One connection at a time.** The session state is a single global, which the
   single-threaded accept loop depends on (see §7).
-- **Target bring-up is blocked** on a start-up problem that predates `main` — see
-  [docs/reactos.md](docs/reactos.md) §9. Nothing in M1 or M2 depends on it.
+- **The client trusts on first use, and speaks only our suite.** Its `known_hosts`
+  is a plain two-column file keyed by the host string typed on the command line
+  (no hashing, no `[host]:port` form). Keys are `rossh --genkey` PKCS#8 DER
+  ed25519: ReactOS has neither `ssh-keygen` nor a `~/.ssh` convention, so
+  `--genkey` and `-i <path>` are the workflow, and it cannot read an OpenSSH key
+  file. It offers exactly §4.1, so it will not talk to an ancient server —
+  acceptable, since the servers we care about are current.
+- **Target bring-up.** Solved. The start-up wall that predated `main` (imports
+  ReactOS's `msvcrt` lacks) and the later `wc_InitRng` fault are both fixed — see
+  [docs/reactos.md](docs/reactos.md) §9 and §9.1. rossh now runs and serves on
+  ReactOS and Windows 7.
 - **wSSH stays installed** during development. The old service is never
   uninstalled or reconfigured from this project until rossh is proven. The binary
   is uploaded as a file and run by hand; nothing is registered.
