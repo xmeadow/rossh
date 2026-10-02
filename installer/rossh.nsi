@@ -95,13 +95,15 @@ FunctionEnd
 Function KeyPageLeave
     ${NSD_GetText} $PortEdit $PortText
     ${NSD_GetText} $KeyEdit $KeyText
+    ; A blank port falls back to the build-time default; anything else must be a
+    ; real port. Compare through LogicLib: hand-written jump labels are easy to
+    ; get wrong (a duplicated label makes the installer loop forever).
     ${If} $PortText != ""
-        IntCmp $PortText 1 ok bad ok
-        ok:
-        IntCmp $PortText 65535 ok ok bad
-        bad:
-            MessageBox MB_ICONEXCLAMATION "Port must be 1..65535."
+        ${If} $PortText < 1
+        ${OrIf} $PortText > 65535
+            MessageBox MB_ICONEXCLAMATION "Port must be between 1 and 65535."
             Abort
+        ${EndIf}
     ${EndIf}
 FunctionEnd
 
