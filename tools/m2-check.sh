@@ -87,6 +87,23 @@ case "$out" in
 esac
 stop_server
 
+echo "=== exec output larger than one channel packet ==="
+# This is the case that used to be truncated: wolfSSH_ChannelSend() reports how
+# many bytes the peer accepted, and a chunk bigger than the peer's window or
+# maximum packet is only sent in part.
+start_server
+out=$(ssh $opts -q -i "$work/good" testuser@127.0.0.1 'seq 1 5000' 2>&1)
+# ssh's own "Connection ... closed" note lands on stderr; count only the data.
+lines=$(printf '%s\n' "$out" | grep -c '^[0-9]')
+last=$(printf '%s\n' "$out" | grep '^[0-9]' | tail -1)
+if [ "$last" = "5000" ] && [ "$lines" -eq 5000 ]; then
+    echo "  ok: all 5000 lines arrived"
+else
+    echo "  FAIL: expected 5000 lines ending in 5000, got $lines ending in '$last'"
+    fail=1
+fi
+stop_server
+
 echo "=== server log ==="
 cat "$log"
 

@@ -158,12 +158,48 @@ static int auth_cb(byte auth_type, WS_UserAuthData *auth, void *ctx)
 
 /* ------------------------------------------------------------- command ----- */
 
+/*
+ * Push command output out of the channel.
+ *
+ * wolfSSH_ChannelSend() returns the number of bytes the peer accepted, not a
+ * status: a chunk larger than the peer's window or maximum packet size is sent
+ * only in part, and the rest has to follow. Treating that partial count as an
+ * error is how output used to get silently truncated — `whoami` arrived, the
+ * second command in the same line did not.
+ */
 static void send_to_channel(const char *data, size_t len, void *ctx)
 {
-    int rc = wolfSSH_ChannelSend((WOLFSSH_CHANNEL *)ctx,
-                                 (const byte *)data, (word32)len);
-    if (rc != WS_SUCCESS)
+    WOLFSSH_CHANNEL *channel = (WOLFSSH_CHANNEL *)ctx;
+    size_t           sent    = 0;
+    int              stalls  = 0;
+
+    while (sent < len) {
+        word32 n  = (word32)(len - sent);
+        int    rc = wolfSSH_ChannelSend(channel, (const byte *)data + sent, n);
+
+        if (rc > 0) {                      /* the peer took that many bytes */
+            sent += ((size_t)rc > (size_t)n) ? (size_t)n : (size_t)rc;
+            stalls = 0;
+            continue;
+        }
+
+        if (rc == WS_WINDOW_FULL || rc == WS_WANT_WRITE) {
+            /* The window is exhausted. The peer owes us an adjustment once it
+             * has read; on a blocking socket, pumping the session is what lets
+             * it arrive. Give up only if the peer never gets there. */
+            if (++stalls > 1000) {
+                printf("exec: the channel window stayed full, output truncated\n");
+                return;
+            }
+            if (wolfSSH_worker(g_session.ssh, NULL) < 0 &&
+                wolfSSH_get_error(g_session.ssh) == WS_EOF)
+                return;                    /* peer gone */
+            continue;
+        }
+
         printf("exec: channel send failed (%d), output truncated\n", rc);
+        return;
+    }
 }
 
 #ifdef _WIN32

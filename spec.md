@@ -272,9 +272,12 @@ invocations need `%SystemRoot%\system32` prepended.
   rather than asserting the opposite. Real confinement needs either a small
   upstream patch or our own SFTP file layer — M4, together with per-user policy
   (where an SFTP-only user, without `exec`, would make a chroot meaningful).
-- **No flow control on exec output yet.** The output sink ignores the window-full
-  case, so a command that produces a great deal of output can be truncated. Fine
-  for `deploy.sh`, not for reading something large.
+- **Session end is not a clean SSH disconnect.** `exec` output now respects the
+  peer's window, so nothing is truncated any more, but the session still ends
+  by closing the socket instead of sending `SSH_MSG_DISCONNECT`. A quiet client
+  (`ssh -q`) says nothing; others remark on it. Sending the disconnect where it
+  seemed obvious truncated the final packets and lost the exit status, so this
+  needs a gentler teardown (let the client close first) rather than a one-liner.
 - **One connection at a time.** The session state is a single global, which the
   single-threaded accept loop depends on (see §7).
 - **Target bring-up is blocked** on a start-up problem that predates `main` — see
