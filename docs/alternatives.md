@@ -35,21 +35,37 @@ What speaks against it:
 
 | Finding | Consequence |
 | ------- | ----------- |
+| `libcrypto.dll` imports **`inet_pton`** from `WS2_32.dll`; `sshd-session.exe`/`sshd-auth.exe` import `inet_ntop` | ReactOS 0.4.16 exports **neither** — `sshd.exe` fails to load before anything else below matters |
 | `MajorSubsystemVersion 6.0` | may trip ReactOS' loader version check |
 | `sshd-session.exe` uses `CreateRestrictedToken`, `CreateProcessAsUserW`, `AdjustTokenPrivileges`, `LookupAccountNameW`, `GetTokenInformation` | the full Windows privilege-separation and token stack — ReactOS' weakest area |
 | The engine is split across `sshd.exe` → `sshd-session.exe` / `sshd-auth.exe` | more moving parts, more surface for those token calls |
 | its `libcrypto.dll` is **LibreSSL** (per the PDB path in the binary), still calling `BCryptGenRandom` | it would inherit ReactOS' broken RNG |
 | a large foreign codebase whose Windows port we do not control | no way to fix ReactOS-specific problems ourselves |
 
-**Verdict: unresolved, and cheap to resolve.** The two risks (loader version
-check, token stack) can only be settled by running it on the VM. That test should
-happen before any code is written, because a success would shrink this project to
-a configuration and packaging wrapper around a proven server. A failure is
-equally valuable: it is the written justification for building our own.
+**Verdict: rejected — it does not load on ReactOS.** Settled by running it on the
+VM (release `10.0.0.0p2-Preview`, the 32-bit `OpenSSH-Win32.zip`), safe by
+construction: a fresh `C:\ossh`, `sshd.exe -D -d -f sshd_config` on port 2222, no
+service registration, no installer, rossh untouched on port 22.
 
-The test is safe by construction: fresh directory, `sshd.exe -D -d` on port 2222,
-no service registration, no installer, wSSH untouched on port 22, PVE snapshot
-beforehand.
+The blocker is not the token stack or the RNG — it is earlier, at load time:
+
+```
+sshd.exe - Entry Point Not Found
+The procedure entry point inet_pton could not be located in the dynamic link
+library WS2_32.dll.
+```
+
+`objdump` confirms it end to end: `libcrypto.dll` imports `inet_pton` from
+`WS2_32.dll`, and `sshd-session.exe` / `sshd-auth.exe` import `inet_ntop`;
+ReactOS 0.4.16's `ws2_32.dll` exports neither (it has `inet_addr` / `inet_ntoa`
+only). Because `sshd.exe` loads `libcrypto.dll`, the process cannot start at all,
+and the failure is a modal dialog — which is also why a foreground `sshd` looks
+*hung* rather than failed.
+
+A shim is conceivable (a `WS2_32`-adjacent DLL exporting the pair), but it would
+have to sit ahead of a known DLL and would buy only the load — the privilege /
+token stack and the `BCryptGenRandom` RNG problem are untouched. Not worth it.
+This is the written justification for building our own.
 
 ## C. wolfSSH on wolfSSL — **chosen**
 
