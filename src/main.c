@@ -338,6 +338,13 @@ int server_run(const config_t *cfg, int once)
                 break;
             continue;
         }
+        /* Re-read the authorised keys for every connection: a key added after
+         * the service started (or removed to revoke it) takes effect on the
+         * next connection, with no restart. The file is tiny, and this is how
+         * dogfooding wants it to behave. */
+        if (cfg->authorized_keys[0] != '\0' &&
+            keylist_load(&g_keys, cfg->authorized_keys) != 0)
+            log_warn("cannot read authorised keys '%s'", cfg->authorized_keys);
         session_bind(ssh, &g_keys);
 
         wolfSSH_set_fd(ssh, (WS_SOCKET_T)cfd);

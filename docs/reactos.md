@@ -115,6 +115,9 @@ plausibly why shell requests on this VM achieve nothing.
 - `CreateProcess` with piped stdio
 - the Service Control Manager — wSSH runs as a service, autostart
 - console APIs (`WriteConsoleA`, `ReadConsoleInputA`, `SetConsoleMode`)
+- NSIS installers — `rossh-setup.exe` installs and uninstalls cleanly
+- rossh itself as a service: `rossh setup` installs it (LocalSystem, autostart)
+  and a stock OpenSSH client reaches it from the LAN with no `-o` flags
 
 **Console output uses an OEM code page**, so `cmd`'s own messages are not UTF-8.
 Anything that forwards text must repair the encoding before sending it.
@@ -245,3 +248,4 @@ of wSSH and ReactOS, not of rossh.
 | wSSH forwards **stdout**, not stderr | diagnostics written to stderr are invisible. rossh makes stdout unbuffered and folds stderr into it. |
 | `ping` is not a liveness test — ICMP is dropped even when the box is perfectly fine (100 % loss measured while port 22 answered immediately) | test the port. |
 | `tasklist` and `taskkill` exist only at `C:\ReactOS\system32\` | as with everything else, the full path. |
+| There is no `net.exe` and no `netsh` | `net start`/`net stop` and the firewall step do nothing here. Service control goes through rossh's own `--install` / `--uninstall`; `setup`'s firewall call is a harmless no-op. |

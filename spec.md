@@ -82,10 +82,10 @@ flags.
 
 - `publickey` (`ssh-ed25519`) — the primary path, required for unattended use.
 - `password` — supported, off by default.
-- Authorised keys live per user in the config directory, following wSSH's file
-  naming so existing material keeps working. Until that layer exists (M4) the
-  server takes a single `--authorized-keys <file>`, in the same
-  one-line-per-key format.
+- Authorised keys come from `authorized_keys` in the config (§5), one OpenSSH
+  public key per line. The file is re-read on every connection, so adding or
+  removing a key takes effect at the next login, with no restart. Per-user key
+  files are M4c.
 - No NT authentication and no impersonation: the service runs as one account and
   spawns children as itself. This is the deliberate escape from the token stack
   that blocks the off-the-shelf alternatives (see docs/alternatives.md).
