@@ -11,6 +11,8 @@
 CC      ?= gcc
 WINCC   ?= i686-w64-mingw32-gcc
 JOBS    ?= 8
+NSIS    ?= makensis
+VERSION ?= 0.4.0
 
 FLAVOR  ?= native
 BUILD   ?= build/$(FLAVOR)
@@ -56,7 +58,7 @@ STRIP_FLAG_win32  = -s
 STRIP_FLAG        = $(STRIP_FLAG_$(FLAVOR))
 LDLIBS        = $(LDLIBS_$(FLAVOR))
 
-.PHONY: all win32 clean deps FORCE_DEPS
+.PHONY: all win32 clean deps FORCE_DEPS installer
 
 all:
 	@$(MAKE) --no-print-directory binary
@@ -100,6 +102,13 @@ deps:
 	@mkdir -p $(BUILD)
 	@printf '%s' "$(DEP_CPPFLAGS)" > $(DEPS_STAMP)
 	@touch $(PREFIX)/.deps
+
+# The Windows installer: package the win32 binary and let `rossh setup` do the
+# work. Needs makensis (NSIS), which runs on Linux and cross-builds the .exe.
+installer:
+	@$(MAKE) --no-print-directory win32
+	$(NSIS) -DVERSION=$(VERSION) -DROOT="$(CURDIR)" installer/rossh.nsi
+	@echo "built rossh-setup.exe  [installer]"
 
 clean:
 	rm -rf build rossh rossh.exe

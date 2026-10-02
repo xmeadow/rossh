@@ -230,6 +230,7 @@ A Makefile mirroring the sibling project `igor`:
 ```sh
 make            # native build (Linux) — the development and test loop
 make win32      # 32-bit Win32 .exe for ReactOS
+make installer  # rossh-setup.exe — NSIS, the 32-bit Windows installer
 ```
 
 `i686-w64-mingw32-gcc -std=c11`, statically linked, no runtime dependency
@@ -272,7 +273,7 @@ invocations need `%SystemRoot%\system32` prepended.
 | M4a | Config and logging | done — a `rossh.conf` named with `--config` sets port, bind, host key, authorised keys, SFTP root and log file/level; the command line overrides it (`src/config.c`, `src/log.c`) |
 | M4b | Service | done — `rossh --install <config>` registers it (auto-start, LocalSystem) and starts it; `--uninstall` stops and removes it. Verified on Windows 7: install, serve, `net stop`/`net start`, remove |
 | M4c | Per-user policy | keys per account, SFTP-only users |
-| M4d | Setup | done — `rossh setup [--key <pubkey>] [--port <n>] [--no-firewall] [dir]` generates the host key, writes the config, authorises a key, installs and starts the service, and opens the firewall. Verified on Windows 7: the machine answers right after. Re-running is safe (nothing is clobbered, the key is not duplicated) |
+| M4d | Setup | done — `rossh setup [--key <pubkey>] [--port <n>] [--no-firewall] [dir]` generates the host key, writes the config, authorises a key, installs and starts the service, and opens the firewall. `make installer` wraps it in an NSIS `rossh-setup.exe`. Both verified on Windows 7: the machine answers right after, and the uninstaller removes service, rule and files |
 | M5 | Optional: tunnels | — |
 
 ## 11. Risks and open questions

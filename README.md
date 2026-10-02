@@ -78,7 +78,8 @@ src/
   config.c, config.h     the key = value config file
   log.c, log.h           leveled logging (console + optional file)
   rng.c, rng.h           the entropy pool
-Makefile                 make (native) · make win32 (ReactOS)
+Makefile                 make (native) · make win32 (ReactOS) · make installer
+installer/rossh.nsi      NSIS script behind rossh-setup.exe
 third_party/             wolfSSL + wolfSSH, pinned submodules
 ```
 
@@ -89,6 +90,7 @@ Mirroring the sibling project `igor`:
 ```sh
 make            # native build (Linux) — the dev/test loop
 make win32      # 32-bit Win32 .exe for ReactOS
+make installer  # rossh-setup.exe — needs makensis (NSIS), runs on Linux
 ```
 
 `i686-w64-mingw32-gcc`, statically linked, no external runtime dependency. The
