@@ -22,10 +22,12 @@
 
 #include "b64.h"
 #include "config.h"
+#include "hostkey.h"
 #include "log.h"
 #include "rng.h"
 #include "server.h"
 #include "service.h"
+#include "setup.h"
 #include "session.h"
 #include "client.h"
 
@@ -108,115 +110,6 @@ static int load_host_key(WOLFSSH_CTX *ctx, const char *path)
         return -1;
     }
     return 0;
-}
-
-/*
- * Write `<path>.pub`, the OpenSSH one-line form of an ed25519 key's public half.
- *
- * The wire form of that half is: string "ssh-ed25519", then string key — the
- * very blob a client offers and that authorized_keys carries, so one encoding
- * serves both ends and no other tool is needed to move a key between them.
- */
-static int write_public_line(const ed25519_key *key, const char *path)
-{
-    byte   blob[64];
-    byte   b64[128];
-    byte   pub[ED25519_PUB_KEY_SIZE];
-    word32 pubSz = (word32)sizeof pub;
-    word32 idx   = 0;
-    int    b64Sz;
-    char   pub_path[512];
-    FILE  *f;
-
-    if (wc_ed25519_export_public(key, pub, &pubSz) != 0)
-        return -1;
-
-    blob[idx++] = 0;
-    blob[idx++] = 0;
-    blob[idx++] = 0;
-    blob[idx++] = 11;
-    memcpy(blob + idx, "ssh-ed25519", 11);
-    idx += 11;
-    blob[idx++] = 0;
-    blob[idx++] = 0;
-    blob[idx++] = 0;
-    blob[idx++] = (byte)pubSz;
-    memcpy(blob + idx, pub, pubSz);
-    idx += pubSz;
-
-    b64Sz = b64_encode_nl(blob, idx, (char *)b64, sizeof b64);
-    if (b64Sz < 0)
-        return -1;
-
-    snprintf(pub_path, sizeof pub_path, "%s.pub", path);
-    f = fopen(pub_path, "w");
-    if (f == NULL)
-        return -1;
-    fprintf(f, "ssh-ed25519 %s rossh\n", (const char *)b64);
-    fclose(f);
-
-    printf("wrote the public half to %s\n", pub_path);
-    return 0;
-}
-
-/*
- * Create a host key. rossh owns this because the target has neither openssl nor
- * ssh-keygen.
- *
- * The file has to carry the key's own public half: wolfSSH re-decodes it on
- * every key exchange and needs the public key to build the reply, and wolfSSL
- * does not derive it. wc_Ed25519PrivateKeyToDer() writes the private part only,
- * which fails later with PUBLIC_KEY_E (-134); wc_Ed25519KeyToDer() writes both.
- */
-static int generate_host_key(const char *path)
-{
-    WC_RNG      rng;
-    ed25519_key key;
-    byte        der[256];
-    int         derSz = 0;
-    FILE       *f;
-
-    if (wc_InitRng(&rng) != 0) {
-        fprintf(stderr, "rossh: cannot start the RNG\n");
-        return -1;
-    }
-    if (wc_ed25519_init(&key) != 0) {
-        fprintf(stderr, "rossh: cannot initialise ed25519\n");
-        wc_FreeRng(&rng);
-        return -1;
-    }
-
-    if (wc_ed25519_make_key(&rng, ED25519_KEY_SIZE, &key) != 0) {
-        fprintf(stderr, "rossh: key generation failed\n");
-        goto done;
-    }
-
-    derSz = wc_Ed25519KeyToDer(&key, der, sizeof der);
-    if (derSz <= 0) {
-        fprintf(stderr, "rossh: key export failed (%d)\n", derSz);
-        goto done;
-    }
-
-    f = fopen(path, "wb");
-    if (f == NULL) {
-        fprintf(stderr, "rossh: cannot write '%s'\n", path);
-        derSz = -1;
-        goto done;
-    }
-    if (fwrite(der, 1, (size_t)derSz, f) != (size_t)derSz) {
-        fprintf(stderr, "rossh: short write to '%s'\n", path);
-        fclose(f);
-        derSz = -1;
-        goto done;
-    }
-    fclose(f);
-    printf("wrote a %d-byte ed25519 host key to %s\n", derSz, path);
-    write_public_line(&key, path);
-
-done:
-    wc_ed25519_free(&key);
-    wc_FreeRng(&rng);
-    return (derSz > 0) ? 0 : -1;
 }
 
 /* A short pause, and the platform's last socket error. */
@@ -505,6 +398,10 @@ int main(int argc, char **argv)
     if (is_ssh_invocation(argv[0]) || client_requested(argc, argv))
         return client_main(argc, argv);
 
+    /* `setup' is a subcommand: rossh setup [options] [dir]. */
+    if (argc > 1 && strcmp(argv[1], "setup") == 0)
+        return setup_main(argc, argv);
+
     /* Line-wise output, and everything on one stream: wSSH's exec forwards
      * stdout and not stderr, and an error nobody can see is worse than one on
      * the wrong stream. Measured on the target — see docs/build.md. */
@@ -609,7 +506,7 @@ int main(int argc, char **argv)
     trace("rng done");
 
     if (genkey_path != NULL) {
-        rc = generate_host_key(genkey_path);
+        rc = hostkey_generate(genkey_path);
         trace(rc == 0 ? "genkey ok" : "genkey failed");
         return (rc == 0) ? 0 : 1;
     }

@@ -204,15 +204,17 @@ channels, and the SFTP *protocol*. What is left is ours:
 
 | Module                 | Responsibility |
 | ---------------------- | -------------- |
-| `src/main.c`           | command line and service entry point; `--genkey`; dispatches `ssh` mode |
+| `src/main.c`           | command line, `ssh`-mode dispatch, and the server loop (`server_run`) |
 | `src/session.c`        | the server: wolfSSH callbacks, `exec` via `CreateProcess` + pipes, exit status |
 | `src/client.c`         | the client: connect, verify the host key (trust on first use), authenticate, run one command, report its exit status |
 | `src/b64.c`            | one-line base64 for `.pub` lines and `known_hosts` entries |
 | `src/config.c`         | the `key = value` config file (§5) |
+| `src/hostkey.c`        | ed25519 key creation, for `--genkey` and setup |
+| `src/setup.c`          | `rossh setup`: host key, config, authorised key, service, firewall (M4d) |
 | `src/policy.c`         | per-user policy: keys per account, SFTP-only users (M4c) |
 | `src/rng.c`            | the entropy pool (§6.1), wired into wolfCrypt's seed callback |
 | `src/sftp_backend.c`   | Win32 file access behind the SFTP/SCP protocol layer (P1) |
-| `src/service.c`        | SCM install/run/stop |
+| `src/service.c`        | Windows service: install / remove / run as LocalSystem (M4b) |
 | `src/log.c`            | leveled logging to the console and an optional file |
 | `third_party/wolfssl`  | pinned submodule — crypto |
 | `third_party/wolfssh`  | pinned submodule — SSH implementation |
@@ -270,7 +272,7 @@ invocations need `%SystemRoot%\system32` prepended.
 | M4a | Config and logging | done — a `rossh.conf` named with `--config` sets port, bind, host key, authorised keys, SFTP root and log file/level; the command line overrides it (`src/config.c`, `src/log.c`) |
 | M4b | Service | done — `rossh --install <config>` registers it (auto-start, LocalSystem) and starts it; `--uninstall` stops and removes it. Verified on Windows 7: install, serve, `net stop`/`net start`, remove |
 | M4c | Per-user policy | keys per account, SFTP-only users |
-| M4d | Setup | `rossh setup`: host key, config, service, firewall — usable without wSSH |
+| M4d | Setup | done — `rossh setup [--key <pubkey>] [--port <n>] [--no-firewall] [dir]` generates the host key, writes the config, authorises a key, installs and starts the service, and opens the firewall. Verified on Windows 7: the machine answers right after. Re-running is safe (nothing is clobbered, the key is not duplicated) |
 | M5 | Optional: tunnels | — |
 
 ## 11. Risks and open questions
