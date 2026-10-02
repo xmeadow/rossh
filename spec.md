@@ -96,7 +96,13 @@ flags.
 
 - SFTP **v3** (`draft-ietf-secsh-filexfer-02`), the version every client still
   negotiates, so modern `scp` (which is SFTP underneath) works.
-- Per-user root jail, with permission flags mirroring wSSH's `SFTP*` settings.
+- A root directory per user, mirroring wSSH's `SFTP*` settings.
+
+  The root is a **starting directory, not a confinement**: wolfSSH's built-in
+  SFTP server resolves a relative path against it, but does not prepend it to
+  an absolute one, and `..` is resolved lexically. A real chroot is M4 work —
+  see §11. It is not a security boundary today in any case, because the same
+  user may open a command channel (`exec`) and read whatever it likes.
 
 ## 5. Configuration
 
@@ -239,7 +245,7 @@ invocations need `%SystemRoot%\system32` prepended.
 | M0 | Recon: behaviour corpus, platform facts, alternatives evaluated, wolfSSH cross-build validated | done — `docs/` and `docs/build.md` |
 | M1 | Vendored build wired in; wolfCrypt's RNG redirected to our pool; offer `curve25519-sha256` + `ssh-ed25519` + `aes256-gcm` | done — `tools/m1-check.sh` passes: the offer is exactly §4.1, and a stock client negotiates `curve25519-sha256`/`ssh-ed25519`/`aes128-gcm@openssh.com` with no `-o` flags and is refused at authentication |
 | M2 | Authentication + exec channel | done — `tools/m2-check.sh` passes: an authorised key logs in, an unauthorised one is refused, and `exec` returns stdout and the command's exit status unchanged |
-| M3 | SFTP v3 + jail | `scp` works **without** `-O` |
+| M3 | SFTP v3; the root is a starting directory | `scp` works **without** `-O`, both ways, byte for byte — `tools/m3-check.sh` passes |
 | M4 | Service, ini compatibility, logging | runs as a service next to wSSH, config parses wSSH files |
 | M5 | Optional: tunnels | — |
 
@@ -260,6 +266,12 @@ invocations need `%SystemRoot%\system32` prepended.
   fallback? Not decided.
 - **RSA.** Dropped in P0 (§4.1). Revisit only if a client without `ssh-ed25519`
   ever needs to connect.
+- **The SFTP root does not confine.** `wolfSSH_GetPath()` skips the default
+  path when the client sends an absolute path, and its `..` handling is lexical
+  (and, at a drive root, wrong). `tools/m3-check.sh` *demonstrates* the escape
+  rather than asserting the opposite. Real confinement needs either a small
+  upstream patch or our own SFTP file layer — M4, together with per-user policy
+  (where an SFTP-only user, without `exec`, would make a chroot meaningful).
 - **No flow control on exec output yet.** The output sink ignores the window-full
   case, so a command that produces a great deal of output can be truncated. Fine
   for `deploy.sh`, not for reading something large.

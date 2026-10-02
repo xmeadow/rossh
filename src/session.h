@@ -44,4 +44,8 @@ int session_configure(WOLFSSH_CTX *ctx);
  * Single-connection at a time, like the rest of M2 (spec.md §7). */
 int session_bind(WOLFSSH *ssh, const keylist_t *keys);
 
+/* Serves the SFTP subsystem (M3) until the connection ends. `root`, when not
+ * NULL, is the jail every path is resolved against. */
+int session_sftp(WOLFSSH *ssh, const char *root);
+
 #endif /* ROSSH_SESSION_H */

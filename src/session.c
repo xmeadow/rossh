@@ -9,6 +9,7 @@
 
 #include <wolfssl/options.h>
 #include <wolfssh/ssh.h>
+#include <wolfssh/wolfsftp.h>
 #include <wolfssl/wolfcrypt/coding.h>
 
 #include <stdio.h>
@@ -304,6 +305,71 @@ static int channel_exec_cb(WOLFSSH_CHANNEL *channel, void *ctx)
     return WS_SUCCESS;
 }
 
+/* ------------------------------------------------------------- subsystem --- */
+
+/* A client asks for a subsystem by name in a channel request. We know one:
+ * "sftp". Accepting it hands the session to wolfSSH's SFTP server, which owns
+ * the filesystem side itself (port.c on Windows). Returning non-zero rejects
+ * the request. */
+static int channel_subsys_cb(WOLFSSH_CHANNEL *channel, void *ctx)
+{
+    const char *name = wolfSSH_ChannelGetSessionCommand(channel);
+
+    (void)ctx;
+    printf("subsystem: %s\n", (name != NULL) ? name : "(none)");
+
+    if (name != NULL && strcmp(name, "sftp") == 0)
+        return WS_SUCCESS;
+
+    printf("subsystem: unknown, refused\n");
+    return WS_FATAL_ERROR;
+}
+
+/*
+ * Serve the SFTP subsystem until the client goes away.
+ *
+ * `root` is the jail: every path the client sends is resolved against it and
+ * cannot walk above it. Without one wolfSSH resolves against the process's
+ * working directory, which is rarely what a server wants — M4 makes this
+ * per-user, from the config.
+ */
+int session_sftp(WOLFSSH *ssh, const char *root)
+{
+    int ret;
+    int error;
+
+    if (root != NULL) {
+        if (wolfSSH_SFTP_SetDefaultPath(ssh, root) != WS_SUCCESS) {
+            printf("sftp: cannot use root '%s'\n", root);
+            return WS_FATAL_ERROR;
+        }
+    }
+    printf("sftp: serving from '%s'\n", (root != NULL) ? root : "(cwd)");
+    fflush(stdout);
+
+    /* The version exchange is already done: wolfSSH_accept() runs the SFTP init
+     * itself and reports WS_SFTP_COMPLETE. What is left is to say where files
+     * live — done above — and then answer requests. On a blocking socket a
+     * WANT_READ just means the next call blocks in recv(). */
+    for (;;) {
+        ret   = wolfSSH_SFTP_read(ssh);
+        error = wolfSSH_get_error(ssh);
+
+        if (error == WS_EOF)
+            break;
+        if (error == WS_WANT_READ || error == WS_WANT_WRITE ||
+            error == WS_WINDOW_FULL || error == WS_CHAN_RXD ||
+            ret == WS_REKEYING)
+            continue;
+        if (ret < 0)
+            break;
+    }
+
+    printf("sftp: session ended (%d)\n", ret);
+    fflush(stdout);
+    return ret;
+}
+
 /* ---------------------------------------------------------------- wiring --- */
 
 int session_configure(WOLFSSH_CTX *ctx)
@@ -314,6 +380,7 @@ int session_configure(WOLFSSH_CTX *ctx)
      * registered: there is no pty, so a shell request should fail rather than
      * hang (spec.md §4.3). */
     wolfSSH_CTX_SetChannelReqExecCb(ctx, channel_exec_cb);
+    wolfSSH_CTX_SetChannelReqSubsysCb(ctx, channel_subsys_cb);
     return 0;
 }
 

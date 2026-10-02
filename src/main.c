@@ -255,6 +255,7 @@ int main(int argc, char **argv)
     const char  *bind_addr = "127.0.0.1";   /* loopback unless asked otherwise */
     const char  *genkey_path = NULL;
     const char  *authkeys_path = NULL;
+    const char  *sftp_root = NULL;
     const char  *port_arg = NULL;
     const char  *key_arg  = NULL;
     int          i;
@@ -284,6 +285,8 @@ int main(int argc, char **argv)
             trace_open(argv[++i]);
         else if (strcmp(argv[i], "--authorized-keys") == 0 && i + 1 < argc)
             authkeys_path = argv[++i];
+        else if (strcmp(argv[i], "--sftp-root") == 0 && i + 1 < argc)
+            sftp_root = argv[++i];
         else if (strcmp(argv[i], "--once") == 0)
             once = 1;
         else if (port_arg == NULL)
@@ -421,6 +424,14 @@ int main(int argc, char **argv)
             rc = wolfSSH_accept(ssh);
             printf("wolfSSH_accept -> %d\n", rc);
             fflush(stdout);
+
+            /* A client that asked for the sftp subsystem is handed to the SFTP
+             * server here — wolfSSH_accept() reports that with WS_SFTP_COMPLETE,
+             * having already run the version exchange. exec requests were
+             * answered by their channel callback. */
+            if (rc == WS_SFTP_COMPLETE) {
+                session_sftp(ssh, sftp_root);
+            }
 
             /* Close the session properly. Without this the socket is dropped as
              * soon as accept() returns, and the client sees a connection reset
