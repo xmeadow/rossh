@@ -176,29 +176,36 @@ The general lesson is worth keeping: **a missing import on ReactOS is not an
 error and not a crash.** It is a living process that does nothing, writes nothing
 on any channel, and looks exactly like a hang.
 
-### 9.1 The wall behind it: `wc_InitRng` hangs
+### 9.1 Resolved: `wc_InitRng` crashed — wolfSSL was never initialised
 
-With `main` reachable, the next blocker surfaced at once, and this one is real:
-`wc_InitRng()` never returns on this box. It is not our entropy pool.
+The next blocker was real, and it was ours.
 
-| Probe | Result |
-| ----- | ------ |
-| `rossh.exe --genkey C:\k.der` | stalls after `rng done`; no key written |
-| `rng_start()` | returns |
-| `SystemFunction036` (RtlGenRandom), two calls | both return |
-| `wc_InitRng(&rng)` | never returns |
-| `wc_InitRng` with a trivial `memset` seed callback (no pool) | never returns |
+**Symptom.** With `main` reachable, `rossh.exe --genkey` stopped right after
+`rng done` and never wrote a key; the handshake stalled in the same place. On
+ReactOS it looked like a hang, which is why it stayed a mystery for so long.
 
-So `RtlGenRandom` is fine, our callback is not the problem, and the stall is
-inside wolfSSL's RNG initialisation — which runs a self-test unconditionally
-(`wc_RNG_HealthTestLocal`) before it seeds. Next session: a `DEBUG_WOLFSSL` build
-with the log routed to the trace file, or the ReactOS debug output.
+**Where it was found.** A second machine — plain Windows 7 — reproduced it,
+which made it a *Windows build* problem rather than a ReactOS one. There the
+process did not hang but died with an access violation inside `ntdll.dll`, and
+markers inside wolfSSL's `_InitRng()` localised it to the interval between
+"DRBG pointers set" and the health test: `LockDrbgState()`.
 
-**Consequence today.** With the import fixed, `rossh.exe` reaches `main`, starts,
-loads a host key and listens; a stock client connects and the handshake begins.
-Supplying a host key made elsewhere (the native `rossh --genkey`) is enough to
-bring the server up. The handshake then stops in the same `wc_InitRng` path, so
-`--genkey` and the handshake are the two remaining pieces.
+**Cause.** wolfSSL guards its DRBG state with a global mutex that it does *not*
+initialise statically — `wc_DrbgState_MutexInit()`, called from
+`wolfCrypt_Init()`. rossh never called `wolfCrypt_Init()`, so `wc_InitRng()`
+locked a zeroed `CRITICAL_SECTION`. On Linux this is invisible: a zeroed
+`pthread_mutex_t` is already a valid initialiser, which is exactly why the
+native tests passed the whole time. On Windows it is an access violation in
+ntdll; on ReactOS the same lock simply never returns.
+
+**Fix.** `rng_start()` now calls `wolfCrypt_Init()` before anything else. It is
+the one call wolfSSL requires before any other, and its absence only ever
+showed up on Windows.
+
+**Verified.** On Windows 7: `--genkey` writes a key, the server loads it and
+listens, and a stock `ssh` client — no crypto options of its own — completes the
+handshake, is authenticated by public key, runs `whoami` through the exec
+channel and gets exit status 0 back.
 
 ## 10. Working on the box: what the tooling demands
 

@@ -22,6 +22,7 @@
 
 #include <wolfssl/wolfcrypt/random.h>
 #include <wolfssl/wolfcrypt/sha256.h>
+#include <wolfssl/wolfcrypt/wc_port.h>   /* wolfCrypt_Init */
 
 #ifndef WC_RNG_SEED_CB
     #error "Build with -DWC_RNG_SEED_CB, and configure wolfSSL the same way. See tools/build-deps.sh."
@@ -206,6 +207,19 @@ void rng_start(void)
 {
     byte   entropy[64];
     size_t got;
+    int    rc;
+
+    /* wolfSSL's global state has to be initialised once, before any other
+     * wolfSSL call. In particular this creates the mutex that guards its DRBG
+     * state; without it wc_InitRng() locks an all-zero CRITICAL_SECTION. On
+     * Linux that is invisible, because a zeroed pthread mutex is already valid
+     * — which is why the native tests passed — but on Windows it is an access
+     * violation inside ntdll, and on ReactOS the same lock simply never
+     * returns. That is the whole reason the server looked hung before it ever
+     * seeded a key. */
+    rc = wolfCrypt_Init();
+    if (rc != 0)
+        fprintf(stderr, "rossh: wolfCrypt_Init failed (%d)\n", rc);
 
     /* A domain separator, so an empty pool is never a valid state. */
     mix("rossh/entropy/v1", 16);
