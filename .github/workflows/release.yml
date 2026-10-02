@@ -49,11 +49,54 @@ jobs:
           # land.
           cd dist && sha256sum rossh-* > SHA256SUMS
 
+      # GPLv3 section 6(d) lets us ship the binaries without the source inside
+      # them, on the condition that we keep "clear directions next to the
+      # object code saying where to find the Corresponding Source". The release
+      # page is where the object code is, so the directions go there — naming
+      # the exact commit, because what section 6 asks for is the source this
+      # binary was built from, not whatever main happens to be later. The
+      # statically linked libraries are part of that source, so their pinned
+      # commits are named too.
+      - name: Write the release notes, source pointer first
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          wolfssl=$(git -C third_party/wolfssl rev-parse HEAD)
+          wolfssh=$(git -C third_party/wolfssh rev-parse HEAD)
+          repo="https://github.com/$GITHUB_REPOSITORY"
+
+          # Through sed, because the heredoc body has to be indented to stay
+          # inside this YAML block and Markdown would read ten leading spaces
+          # as a code block. Stripping exactly that prefix keeps the relative
+          # indentation of the list below.
+          sed 's/^          //' > notes.md <<EOF
+          ### Source for these binaries
+
+          Built by GitHub Actions from [\`$GITHUB_SHA\`]($repo/tree/$GITHUB_SHA),
+          which is the Corresponding Source under GPLv3 section 6. The build
+          recipe is [\`docs/build.md\`]($repo/blob/$GITHUB_SHA/docs/build.md)
+          and the exact configure flags are in
+          [\`tools/build-deps.sh\`]($repo/blob/$GITHUB_SHA/tools/build-deps.sh).
+
+          Statically linked, and therefore part of that source:
+
+          - wolfSSL [\`$wolfssl\`](https://github.com/wolfSSL/wolfssl/tree/$wolfssl)
+          - wolfSSH [\`$wolfssh\`](https://github.com/wolfSSL/wolfssh/tree/$wolfssh)
+
+          Check a download with \`sha256sum -c SHA256SUMS\`.
+
+          EOF
+
+          # Fetched separately rather than with --generate-notes, so the source
+          # pointer is reliably first and the changelog follows it.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$GITHUB_REF_NAME" -q .body >> notes.md
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "rossh $GITHUB_REF_NAME" \
-            --generate-notes \
+            --notes-file notes.md \
             dist/*

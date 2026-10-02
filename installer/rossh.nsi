@@ -113,6 +113,18 @@ Section "rossh" SecInstall
     File "${ROOT}/LICENSE"
     File "${ROOT}/README.md"
 
+    ; wolfSSL and wolfSSH are linked statically, so their code is inside
+    ; rossh.exe and their copyright notices travel with it. GPLv3 section 4
+    ; wants those notices kept intact, and a binary-only install is where they
+    ; would otherwise be lost. Renamed to .txt because ReactOS and older
+    ; Windows have no association for an extensionless file, so Notepad opens
+    ; these on a double click.
+    SetOutPath "$INSTDIR\licenses"
+    File "/oname=wolfssl-COPYING.txt"   "${ROOT}/third_party/wolfssl/COPYING"
+    File "/oname=wolfssl-LICENSING.txt" "${ROOT}/third_party/wolfssl/LICENSING"
+    File "/oname=wolfssh-LICENSING.txt" "${ROOT}/third_party/wolfssh/LICENSING"
+    SetOutPath "$INSTDIR"
+
     ; The whole setup, in one call: host key, rossh.conf, the authorised key
     ; (the file named on the page, or one generated here), the service
     ; (auto-start) and the firewall.
@@ -184,6 +196,10 @@ Section "Uninstall"
     Delete "$INSTDIR\rossh.log"
     Delete "$INSTDIR\kh"
     Delete "$INSTDIR\known_hosts"
+    Delete "$INSTDIR\licenses\wolfssl-COPYING.txt"
+    Delete "$INSTDIR\licenses\wolfssl-LICENSING.txt"
+    Delete "$INSTDIR\licenses\wolfssh-LICENSING.txt"
+    RMDir "$INSTDIR\licenses"
     RMDir "$INSTDIR"
 
     Delete "$SMPROGRAMS\${APPNAME}\*.lnk"
