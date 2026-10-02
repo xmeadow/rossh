@@ -19,6 +19,7 @@
 #include <time.h>
 
 #include "rng.h"
+#include "session.h"
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -54,17 +55,9 @@ static const char algo_cipher[]  = "aes256-gcm@openssh.com,aes128-gcm@openssh.co
 static const char algo_mac[]     = "hmac-sha2-256";
 static const char algo_keys[]    = "ssh-ed25519";
 
-/*
- * M1: every authentication is refused. The milestone is that a stock client
- * reaches this point without a single -o flag.
- */
-static int deny_auth(byte authType, WS_UserAuthData *authData, void *ctx)
-{
-    (void)authData;
-    (void)ctx;
-    printf("auth: refused (method %d)\n", (int)authType);
-    return WOLFSSH_USERAUTH_FAILURE;
-}
+/* The authorised keys. File scope so 32 KB of key material does not sit on the
+ * stack. */
+static keylist_t g_keys;
 
 static int load_host_key(WOLFSSH_CTX *ctx, const char *path)
 {
@@ -261,6 +254,7 @@ int main(int argc, char **argv)
     const char  *key_path = DEFAULT_KEY;
     const char  *bind_addr = "127.0.0.1";   /* loopback unless asked otherwise */
     const char  *genkey_path = NULL;
+    const char  *authkeys_path = NULL;
     const char  *port_arg = NULL;
     const char  *key_arg  = NULL;
     int          i;
@@ -288,6 +282,8 @@ int main(int argc, char **argv)
             bind_addr = argv[++i];
         else if (strcmp(argv[i], "--trace") == 0 && i + 1 < argc)
             trace_open(argv[++i]);
+        else if (strcmp(argv[i], "--authorized-keys") == 0 && i + 1 < argc)
+            authkeys_path = argv[++i];
         else if (strcmp(argv[i], "--once") == 0)
             once = 1;
         else if (port_arg == NULL)
@@ -336,7 +332,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    wolfSSH_SetUserAuth(ctx, deny_auth);
+    session_configure(ctx);
     wolfSSH_CTX_SetBanner(ctx, server_banner);
 
     /* Pin the offer. A rejection here is a build problem, not a runtime one. */
@@ -353,6 +349,18 @@ int main(int argc, char **argv)
         return 1;
     printf("host key '%s' loaded\n", key_path);
     trace("host key loaded");
+
+    if (authkeys_path != NULL) {
+        if (keylist_load(&g_keys, authkeys_path) != 0) {
+            printf("rossh: cannot read authorised keys '%s'\n", authkeys_path);
+            return 1;
+        }
+        printf("authorised keys: %d loaded from %s\n",
+               g_keys.count, authkeys_path);
+    }
+    else {
+        printf("rossh: no --authorized-keys given, every login is refused\n");
+    }
 
     lfd = listen_on(bind_addr, port);
     if (lfd == INVALID_SOCKET) {
@@ -407,10 +415,22 @@ int main(int argc, char **argv)
                     break;
                 continue;
             }
+            session_bind(ssh, &g_keys);
 
             wolfSSH_set_fd(ssh, (WS_SOCKET_T)cfd);
             rc = wolfSSH_accept(ssh);
             printf("wolfSSH_accept -> %d\n", rc);
+            fflush(stdout);
+
+            /* Close the session properly. Without this the socket is dropped as
+             * soon as accept() returns, and the client sees a connection reset
+             * instead of its exit status. */
+            for (;;) {
+                rc = wolfSSH_shutdown(ssh);
+                if (rc != WS_WANT_READ && rc != WS_WANT_WRITE)
+                    break;
+            }
+            printf("wolfSSH_shutdown -> %d\n", rc);
             fflush(stdout);
 
             wolfSSH_free(ssh);

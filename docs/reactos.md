@@ -128,3 +128,50 @@ ReactOS' loader behaviour here has not been established.
 **Resolved for rossh.** The wolfSSL/wolfSSH cross-build lands at subsystem
 **4.0 (NT4)** — older than wSSH itself ([build.md](build.md)). The question
 remains live for the off-the-shelf route, see [alternatives.md](alternatives.md).
+
+## 9. An unexplained wall: rossh.exe never reaches `main`
+
+Recorded because it is the current blocker, and because the evidence is worth
+more than the theory.
+
+**Symptom.** `rossh.exe` runs on the VM — the process exists and stays — but it
+produces nothing on stdout or stderr, never listens, and a file written as the
+*first statement of `main`* never appears. So `main` is not reached.
+
+| Probe | Result | Rules out |
+| ----- | ------ | --------- |
+| `hello.exe`, 230 KB, same `i686-w64-mingw32-gcc -static` flags | runs, prints, writes a file | the toolchain, the CRT, the loader, stdout, file I/O |
+| `igor.exe` | runs (per this knowledge base) | `KERNEL32`, `msvcrt`, `WINHTTP` |
+| `certutil.exe` | runs | `crypt32` |
+| `reg.exe` | runs | `advapi32` |
+| `ping.exe` | runs | `ws2_32` |
+| `rossh.exe` | hangs before `main` | — |
+
+So it is neither the DLLs we import nor our application code: it is specific to
+this binary's start-up. What remains are the things a large, statically linked
+mingw image needs *before* `main` — runtime pseudo-relocations, image
+composition — on a loader that is not quite Windows.
+
+**Unproven.** The next experiments would be a hello-world that links a single
+wolfSSH symbol (separating "the library" from "our start-up"), and one that writes
+a file from a constructor.
+
+Two reductions are cheap and worth having regardless: stripping the win32 binary
+halves it (1.82 MB → 894 KB, 16 sections → 8), and dropping `crypt32` — which
+arrives only through wolfSSL's system certificate store, unused here — removes an
+import.
+
+## 10. Working on the box: what the tooling demands
+
+Every item below cost real time, and each has a workaround. They are properties
+of wSSH and ReactOS, not of rossh.
+
+| Fact | Consequence |
+| ---- | ----------- |
+| wSSH's exec does not return while a started child still holds the pipe | a detached server run blocks the whole SSH session. Bound every remote call (`timeout 20 ssh …`), and give the server a `--once` mode so a test run ends by itself. |
+| A killed run leaves an orphan that **locks the executable** | the next `scp` fails with `Failed to open file` or `Access is denied`. Kill it first: `C:\ReactOS\system32\taskkill.exe /F /IM rossh.exe`. |
+| `scp` in legacy mode (`-O`) cannot overwrite an existing file | `del` the target first, then upload. |
+| `PATH` is broken, so a *nested* `cmd.exe` is not found | `cmd.exe /c x & cmd.exe /c y` fails on the second half. Use built-ins directly (`del`, `dir`, `type`) and full paths for everything else. |
+| wSSH forwards **stdout**, not stderr | diagnostics written to stderr are invisible. rossh makes stdout unbuffered and folds stderr into it. |
+| `ping` is not a liveness test — ICMP is dropped even when the box is perfectly fine (100 % loss measured while port 22 answered immediately) | test the port. |
+| `tasklist` and `taskkill` exist only at `C:\ReactOS\system32\` | as with everything else, the full path. |

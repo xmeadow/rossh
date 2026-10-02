@@ -26,14 +26,15 @@ Details and the raw measurements: [docs/wssh.md](docs/wssh.md).
 
 ## Status
 
-**M1 is done.** The server offers the modern suite of [spec.md](spec.md) §4.1 and
-a stock OpenSSH client negotiates `curve25519-sha256` / `ssh-ed25519` /
-`aes128-gcm@openssh.com` against it with **no `-o` flags at all**, reaching
-authentication and being refused there. Verified natively by
-`tools/m1-check.sh`, and `make win32` produces a 32-bit `rossh.exe` importing only
-`ADVAPI32`, `CRYPT32`, `KERNEL32`, `msvcrt` and `WS2_32` at subsystem 4.0 —
-no UCRT, no `vcruntime`, no `bcrypt`. Serving a session is M2; running it on the
-VM comes next.
+**M2 is done.** A stock OpenSSH client negotiates the modern suite of
+[spec.md](spec.md) §4.1 with **no `-o` flags at all**, authenticates with its
+publickey, and **runs a command**: stdout comes back and the exit status is
+passed through unchanged. `tools/m1-check.sh` and `tools/m2-check.sh` verify both.
+
+All of that is verified **natively**. On ReactOS the binary currently does not
+reach `main` at all — see [docs/reactos.md](docs/reactos.md) §9. `make win32` does
+produce a 32-bit `rossh.exe` importing only `ADVAPI32`, `CRYPT32`, `KERNEL32`,
+`msvcrt` and `WS2_32`, at subsystem 4.0: no UCRT, no `vcruntime`, no `bcrypt`.
 
 ## Layout
 
@@ -47,9 +48,11 @@ docs/
 tools/
   build-deps.sh          build the pinned wolfSSL/wolfSSH for one flavor
   probe/kexinit.py       read the peer's algorithm offer, unauthenticated
-  m1-check.sh            M1 acceptance check: offer + flag-free authentication
+  m1-check.sh            M1 check: the offer, and flag-free authentication
+  m2-check.sh            M2 check: authorised key, refused key, exec
 src/
-  main.c                 the server: listener, wolfSSH wiring, --genkey
+  main.c                 listener, wolfSSH wiring, --genkey, --trace
+  session.c, session.h   authentication and the exec channel
   rng.c, rng.h           the entropy pool
 Makefile                 make (native) · make win32 (ReactOS)
 third_party/             wolfSSL + wolfSSH, pinned submodules

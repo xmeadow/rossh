@@ -75,7 +75,9 @@ flags.
 - `publickey` (`ssh-ed25519`) — the primary path, required for unattended use.
 - `password` — supported, off by default.
 - Authorised keys live per user in the config directory, following wSSH's file
-  naming so existing material keeps working.
+  naming so existing material keeps working. Until that layer exists (M4) the
+  server takes a single `--authorized-keys <file>`, in the same
+  one-line-per-key format.
 - No NT authentication and no impersonation: the service runs as one account and
   spawns children as itself. This is the deliberate escape from the token stack
   that blocks the off-the-shelf alternatives (see docs/alternatives.md).
@@ -216,10 +218,11 @@ invocations need `%SystemRoot%\system32` prepended.
 
 - **Algorithm offer:** `tools/probe/kexinit.py` against the legacy wSSH and
   against rossh, to show the offer actually changed. Unauthenticated by design.
-- **Milestone checks:** `tools/m1-check.sh` starts the server on a spare port and
-  asserts both criteria of M1 — the offer, and that a stock client reaches
-  authentication with no `-o` flags. Extend it per milestone rather than relying
-  on manual runs.
+- **Milestone checks:** `tools/m1-check.sh` and `tools/m2-check.sh` start the
+  server on a spare port and assert the criteria of their milestone — the offer
+  and flag-free authentication for M1; an authorised key, a refused key, and
+  `exec` with its exit status for M2. Extend them per milestone rather than
+  relying on manual runs.
 - **Protocol regression:** saved `ssh -vvv` transcripts as fixtures.
 - **Integration:** the Igor deploy loop — `deploy.sh` must work unchanged, minus
   the `-o` flags.
@@ -235,7 +238,7 @@ invocations need `%SystemRoot%\system32` prepended.
 | - | ------- | --------- |
 | M0 | Recon: behaviour corpus, platform facts, alternatives evaluated, wolfSSH cross-build validated | done — `docs/` and `docs/build.md` |
 | M1 | Vendored build wired in; wolfCrypt's RNG redirected to our pool; offer `curve25519-sha256` + `ssh-ed25519` + `aes256-gcm` | done — `tools/m1-check.sh` passes: the offer is exactly §4.1, and a stock client negotiates `curve25519-sha256`/`ssh-ed25519`/`aes128-gcm@openssh.com` with no `-o` flags and is refused at authentication |
-| M2 | Authentication + exec channel | `ssh -p 2222 user@host cmd.exe /c ver` prints output with a correct exit status; `deploy.sh` works |
+| M2 | Authentication + exec channel | done — `tools/m2-check.sh` passes: an authorised key logs in, an unauthorised one is refused, and `exec` returns stdout and the command's exit status unchanged |
 | M3 | SFTP v3 + jail | `scp` works **without** `-O` |
 | M4 | Service, ini compatibility, logging | runs as a service next to wSSH, config parses wSSH files |
 | M5 | Optional: tunnels | — |
@@ -257,10 +260,16 @@ invocations need `%SystemRoot%\system32` prepended.
   fallback? Not decided.
 - **RSA.** Dropped in P0 (§4.1). Revisit only if a client without `ssh-ed25519`
   ever needs to connect.
-- **Service name.** Must not collide with the existing `wSSH` service while both
-  are installed.
+- **No flow control on exec output yet.** The output sink ignores the window-full
+  case, so a command that produces a great deal of output can be truncated. Fine
+  for `deploy.sh`, not for reading something large.
+- **One connection at a time.** The session state is a single global, which the
+  single-threaded accept loop depends on (see §7).
+- **Target bring-up is blocked** on a start-up problem that predates `main` — see
+  [docs/reactos.md](docs/reactos.md) §9. Nothing in M1 or M2 depends on it.
 - **wSSH stays installed** during development. The old service is never
-  uninstalled or reconfigured from this project until rossh is proven.
+  uninstalled or reconfigured from this project until rossh is proven. The binary
+  is uploaded as a file and run by hand; nothing is registered.
 
 ## 12. References
 

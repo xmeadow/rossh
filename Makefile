@@ -37,8 +37,15 @@ CFLAGS += -DDEBUG_WOLFSSH
 endif
 
 LDLIBS_native = -lwolfssh -lwolfssl -lm
-# crypt32: wolfSSL's X.509 store code. advapi32: CryptGenRandom in src/rng.c.
+# crypt32: wolfSSL's X.509 store code. advapi32: RtlGenRandom in src/rng.c.
 LDLIBS_win32  = -lwolfssh -lwolfssl -lws2_32 -lcrypt32 -ladvapi32
+
+# Strip the Windows binary: we do not need debug info inside it, it halves the
+# image (1.8 MB -> 894 KB, 16 sections -> 8) and every section the loader does not
+# have to walk is welcome on ReactOS. See docs/reactos.md section 9.
+STRIP_FLAG_native =
+STRIP_FLAG_win32  = -s
+STRIP_FLAG        = $(STRIP_FLAG_$(FLAVOR))
 LDLIBS        = $(LDLIBS_$(FLAVOR))
 
 .PHONY: all win32 clean deps
@@ -50,7 +57,7 @@ win32:
 	@$(MAKE) --no-print-directory FLAVOR=win32 CC_BIN=$(WINCC) EXE=.exe binary
 
 binary: $(PREFIX)/.deps $(SRC)
-	$(CC_BIN) $(CFLAGS) $(SRC) -o rossh$(EXE) -L$(PREFIX)/lib $(LDLIBS)
+	$(CC_BIN) $(CFLAGS) $(SRC) -o rossh$(EXE) $(STRIP_FLAG) -L$(PREFIX)/lib $(LDLIBS)
 	@echo "built rossh$(EXE)  [$(FLAVOR)]"
 
 $(PREFIX)/.deps: tools/build-deps.sh
