@@ -58,17 +58,28 @@ Page custom KeyPageCreate KeyPageLeave
 ; for reaching the box from elsewhere. Skipped entirely in a silent install
 ; (/S), which falls back to the generated key.
 Function KeyPageCreate
-    !insertmacro MUI_HEADER_TEXT "Your public key" "Paste the key you will connect with, or leave empty."
+    !insertmacro MUI_HEADER_TEXT "Authorized key" "Pick the public-key file you will connect with, or leave empty."
     nsDialogs::Create 1018
     Pop $0
     ${If} $0 == error
         Abort
     ${EndIf}
-    ${NSD_CreateLabel} 0 0 100% 28u "Paste the OpenSSH public key you will connect with, one line:$\r$\nssh-ed25519 AAAA... you@laptop$\r$\nLeave it empty to have rossh generate a client key next to the config instead."
+    ${NSD_CreateLabel} 0 0 100% 30u "Path of a public-key file to authorise (one or more ssh-ed25519 lines), e.g.$\r$\nC:\rossh-key.pub$\r$\nLeave it empty to have rossh generate a client key next to the config instead."
     Pop $0
-    ${NSD_CreateText} 0 32u 100% 12u "$KeyText"
+    ${NSD_CreateText} 0 34u 78% 12u "$KeyText"
     Pop $KeyEdit
+    ${NSD_CreateBrowseButton} 80% 34u 20% 12u "Browse..."
+    Pop $4
+    ${NSD_OnClick} $4 KeyBrowse
     nsDialogs::Show
+FunctionEnd
+
+Function KeyBrowse
+    nsDialogs::SelectFileDialog open "$KeyText" "Public keys (*.pub)|*.pub|All files (*.*)|*.*"
+    Pop $0
+    ${If} $0 != ""
+        ${NSD_SetText} $KeyEdit "$0"
+    ${EndIf}
 FunctionEnd
 
 Function KeyPageLeave
@@ -81,14 +92,12 @@ Section "rossh" SecInstall
     File "${ROOT}/LICENSE"
     File "${ROOT}/README.md"
 
-    ; The whole setup, in one call: host key, rossh.conf, an authorised key,
-    ; the service (auto-start) and the firewall.
+    ; The whole setup, in one call: host key, rossh.conf, the authorised key
+    ; (the file named on the page, or one generated here), the service
+    ; (auto-start) and the firewall.
     DetailPrint "Setting up rossh in $INSTDIR ..."
     ${If} $KeyText != ""
-        FileOpen $0 "$INSTDIR\mykey.pub" w
-        FileWrite $0 "$KeyText$\r$\n"
-        FileClose $0
-        nsExec::ExecToLog '"$INSTDIR\rossh.exe" setup --port ${PORT} --key "$INSTDIR\mykey.pub" "$INSTDIR"'
+        nsExec::ExecToLog '"$INSTDIR\rossh.exe" setup --port ${PORT} --key "$KeyText" "$INSTDIR"'
     ${Else}
         nsExec::ExecToLog '"$INSTDIR\rossh.exe" setup --port ${PORT} "$INSTDIR"'
     ${EndIf}

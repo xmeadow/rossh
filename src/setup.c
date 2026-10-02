@@ -112,59 +112,83 @@ static int write_config(const char *path, int port, const char *hostkey,
     return 0;
 }
 
-/* Copy the one public-key line of `src` into `authkeys`, unless it is already
- * there. */
+/* Is this exact line already in `authkeys`? */
+static int key_line_present(const char *authkeys, const char *want)
+{
+    char  line[2048];
+    FILE *f = fopen(authkeys, "r");
+    int   found = 0;
+
+    if (f == NULL)
+        return 0;
+    while (fgets(line, sizeof line, f) != NULL) {
+        char *nl = strpbrk(line, "\r\n");
+
+        if (nl != NULL)
+            *nl = '\0';
+        if (strcmp(line, want) == 0) {
+            found = 1;
+            break;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+/*
+ * Authorise every public-key line of `src` in `authkeys` — a `.pub` holds one
+ * line, but a file of several is just as valid, and that is how a bootstrap key
+ * file (the operator's and the installer's, say) gets in. Blank lines and
+ * comments are ignored; anything that is not an `ssh-` line at all is an error,
+ * so pointing --key at the wrong file says so rather than doing nothing.
+ */
 static int authorize_key(const char *authkeys, const char *src)
 {
-    char  want[2048];
     char  line[2048];
-    char *nl;
     FILE *f;
+    int   saw_key = 0, added = 0;
 
     f = fopen(src, "r");
     if (f == NULL) {
         log_error("cannot read key file '%s'", src);
         return -1;
     }
-    if (fgets(want, sizeof want, f) == NULL) {
-        log_error("key file '%s' is empty", src);
-        fclose(f);
-        return -1;
-    }
-    fclose(f);
 
-    nl = strpbrk(want, "\r\n");
-    if (nl != NULL)
-        *nl = '\0';
+    while (fgets(line, sizeof line, f) != NULL) {
+        char *nl = strpbrk(line, "\r\n");
+        char *s  = line;
+        FILE *a;
 
-    if (strncmp(want, "ssh-", 4) != 0) {
-        log_error("'%s' is not an OpenSSH public key line", src);
-        return -1;
-    }
+        if (nl != NULL)
+            *nl = '\0';
+        while (*s == ' ' || *s == '\t')
+            s++;
+        if (strncmp(s, "ssh-", 4) != 0)
+            continue;                   /* blank line or comment */
+        saw_key = 1;
+        if (key_line_present(authkeys, s))
+            continue;
 
-    f = fopen(authkeys, "r");
-    if (f != NULL) {
-        while (fgets(line, sizeof line, f) != NULL) {
-            nl = strpbrk(line, "\r\n");
-            if (nl != NULL)
-                *nl = '\0';
-            if (strcmp(line, want) == 0) {
-                log_info("key already authorised in %s", authkeys);
-                fclose(f);
-                return 0;
-            }
+        a = fopen(authkeys, "a");
+        if (a == NULL) {
+            log_error("cannot write '%s'", authkeys);
+            fclose(f);
+            return -1;
         }
-        fclose(f);
+        fprintf(a, "%s\n", s);
+        fclose(a);
+        added = 1;
     }
+    fclose(f);
 
-    f = fopen(authkeys, "a");
-    if (f == NULL) {
-        log_error("cannot write '%s'", authkeys);
+    if (!saw_key) {
+        log_error("'%s' has no public key lines", src);
         return -1;
     }
-    fprintf(f, "%s\n", want);
-    fclose(f);
-    log_info("authorised a key in %s", authkeys);
+    if (added)
+        log_info("authorised key(s) from %s", src);
+    else
+        log_info("keys from %s were already authorised", src);
     return 0;
 }
 
