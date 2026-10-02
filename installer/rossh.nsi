@@ -20,8 +20,9 @@
 
 !define APPNAME   "rossh"
 !define DISPLAY   "rossh SSH server"
-!define PUBLISHER "rossh"
-!define PORT      2222     ; next to wSSH on 22; change once wSSH is gone
+!define PUBLISHER "xmeadow"
+!define PORT      22       ; the stock SSH is gone; 22 is free. The install page
+                          ; overrides this.
 
 Name "${DISPLAY} ${VERSION}"
 OutFile "${ROOT}/rossh-setup.exe"
@@ -36,6 +37,8 @@ SetCompressor /SOLID lzma
 !include "LogicLib.nsh"
 !include "nsDialogs.nsh"
 
+Var PortEdit
+Var PortText
 Var KeyEdit
 Var KeyText
 
@@ -58,17 +61,24 @@ Page custom KeyPageCreate KeyPageLeave
 ; for reaching the box from elsewhere. Skipped entirely in a silent install
 ; (/S), which falls back to the generated key.
 Function KeyPageCreate
-    !insertmacro MUI_HEADER_TEXT "Authorized key" "Pick the public-key file you will connect with, or leave empty."
+    !insertmacro MUI_HEADER_TEXT "Server settings" "Listening port, and the key you will connect with."
     nsDialogs::Create 1018
     Pop $0
     ${If} $0 == error
         Abort
     ${EndIf}
-    ${NSD_CreateLabel} 0 0 100% 30u "Path of a public-key file to authorise (one or more ssh-ed25519 lines), e.g.$\r$\nC:\rossh-key.pub$\r$\nLeave it empty to have rossh generate a client key next to the config instead."
+    ${If} $PortText == ""
+        StrCpy $PortText "${PORT}"
+    ${EndIf}
+    ${NSD_CreateLabel} 0 0 100% 10u "Listening port (22 replaces a stock SSH server):"
     Pop $0
-    ${NSD_CreateText} 0 34u 78% 12u "$KeyText"
+    ${NSD_CreateText} 0 12u 30% 12u "$PortText"
+    Pop $PortEdit
+    ${NSD_CreateLabel} 0 36u 100% 24u "Authorized key file (one or more ssh-ed25519 lines), e.g. C:\rossh-key.pub.$\r$\nLeave it empty to have rossh generate a client key next to the config instead."
+    Pop $0
+    ${NSD_CreateText} 0 62u 78% 12u "$KeyText"
     Pop $KeyEdit
-    ${NSD_CreateBrowseButton} 80% 34u 20% 12u "Browse..."
+    ${NSD_CreateBrowseButton} 80% 62u 20% 12u "Browse..."
     Pop $4
     ${NSD_OnClick} $4 KeyBrowse
     nsDialogs::Show
@@ -83,7 +93,16 @@ Function KeyBrowse
 FunctionEnd
 
 Function KeyPageLeave
+    ${NSD_GetText} $PortEdit $PortText
     ${NSD_GetText} $KeyEdit $KeyText
+    ${If} $PortText != ""
+        IntCmp $PortText 1 ok bad ok
+        ok:
+        IntCmp $PortText 65535 ok ok bad
+        bad:
+            MessageBox MB_ICONEXCLAMATION "Port must be 1..65535."
+            Abort
+    ${EndIf}
 FunctionEnd
 
 Section "rossh" SecInstall
@@ -95,11 +114,17 @@ Section "rossh" SecInstall
     ; The whole setup, in one call: host key, rossh.conf, the authorised key
     ; (the file named on the page, or one generated here), the service
     ; (auto-start) and the firewall.
-    DetailPrint "Setting up rossh in $INSTDIR ..."
+    StrCpy $1 "${PORT}"
+    ${If} $PortText != ""
+        StrCpy $1 "$PortText"
+    ${EndIf}
+    WriteRegStr HKLM "Software\${APPNAME}" "Port" "$1"
+
+    DetailPrint "Setting up rossh in $INSTDIR on port $1 ..."
     ${If} $KeyText != ""
-        nsExec::ExecToLog '"$INSTDIR\rossh.exe" setup --port ${PORT} --key "$KeyText" "$INSTDIR"'
+        nsExec::ExecToLog '"$INSTDIR\rossh.exe" setup --port $1 --key "$KeyText" "$INSTDIR"'
     ${Else}
-        nsExec::ExecToLog '"$INSTDIR\rossh.exe" setup --port ${PORT} "$INSTDIR"'
+        nsExec::ExecToLog '"$INSTDIR\rossh.exe" setup --port $1 "$INSTDIR"'
     ${EndIf}
     Pop $0
     ${If} $0 != 0
@@ -131,7 +156,14 @@ Section "Uninstall"
     nsExec::ExecToLog '"$INSTDIR\rossh.exe" --uninstall'
     Pop $0
 
-    nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="rossh ${PORT}"'
+    ; The firewall rule is named after the port we actually used, which the
+    ; installer recorded in the registry (default to the build-time one).
+    ReadRegStr $2 HKLM "Software\${APPNAME}" "Port"
+    ${If} $2 == ""
+        StrCpy $2 "${PORT}"
+    ${EndIf}
+
+    nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="rossh $2"'
     Pop $0
 
     Delete "$INSTDIR\rossh.exe"
