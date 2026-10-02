@@ -37,11 +37,16 @@ This is verified on **Linux** (`tools/m1-check.sh`, `m2-check.sh`, `m3-check.sh`
 `client-check.sh`) and on the real targets: **ReactOS 0.4.16** and **Windows 7
 SP1** both serve the handshake, `exec`, `scp` and `--genkey`. The **client** is
 likewise verified on ReactOS: run as `ssh`, it connects to a stock OpenSSH 10
-server on the LAN, runs a command and returns its exit status unchanged. The
-start-up walls that once stopped the binary from reaching `main` on ReactOS, and
-later stopped the client before its first byte, are all solved — see
-[docs/reactos.md](docs/reactos.md) §9, §9.1 and §9.2. `make win32` produces a 32-bit
-`rossh.exe` importing only `ADVAPI32`, `CRYPT32`, `KERNEL32`, `msvcrt` and
+server on the LAN, runs a command and returns its exit status unchanged.
+
+**M4 is underway.** The server now reads a small `rossh.conf` (its own format,
+not wSSH's) and logs to a file and the console at a chosen level; the service and
+the installer are next.
+
+The start-up walls that once stopped the binary from reaching `main` on ReactOS,
+and later stopped the client before its first byte, are all solved — see
+[docs/reactos.md](docs/reactos.md) §9, §9.1 and §9.2. `make win32` produces a
+32-bit `rossh.exe` importing only `ADVAPI32`, `CRYPT32`, `KERNEL32`, `msvcrt` and
 `WS2_32`, at subsystem 4.0: no UCRT, no `vcruntime`, no `bcrypt`.
 
 ## Layout
@@ -65,6 +70,8 @@ src/
   session.c, session.h   server: authentication, the exec channel, SFTP
   client.c, client.h     client: connect, authenticate, run one command
   b64.c, b64.h           one-line base64 for .pub lines and known_hosts
+  config.c, config.h     the key = value config file
+  log.c, log.h           leveled logging (console + optional file)
   rng.c, rng.h           the entropy pool
 Makefile                 make (native) · make win32 (ReactOS)
 third_party/             wolfSSL + wolfSSH, pinned submodules

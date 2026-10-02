@@ -114,28 +114,36 @@ flags.
 
 ## 5. Configuration
 
-ini files, deliberately **wSSH-compatible**, so the existing host configuration
-and the documentation in the knowledge base do not break:
+**Our own format, not wSSH's.** The original plan was wSSH-compatible ini files,
+so that the existing host configuration would not break. But wSSH is being
+retired, not coexisted with, so mirroring a dead tool's schema buys nothing and
+costs a parser tied to its quirks. The format is a small, sshd-flavoured
+`key = value` file (`src/config.c`): `#` or `;` comments, case-insensitive keys,
+whitespace around `=` ignored, an optional pair of double quotes around a value.
 
-- `rossh.ini` — the server settings (`[Service]`, `[Server]`, `[Logging]`,
-  `[SSH]`, `[SFTP]`, `[Tunnel]`), same key names as wSSH.
-- `Config/user_<name>.ini` — per-user overrides, same schema.
-- `Config/user_<name>.pub` — authorised keys.
-- `Config/host_<ip>.allow` / `.deny` — host filter files, same semantics.
-- `Config/tunnel_*.allow` — P3.
+A config file exists only when one is named with `--config <path>`. With none —
+as in every test script — the defaults below stand, so a bare command line keeps
+working exactly as before.
 
-The full reference schema is in [docs/wssh.md](docs/wssh.md#configuration).
-wolfSSH is driven through its C API from `src/policy.c`; its own example config
-file does not constrain the format we expose.
+| Key               | Default               | Meaning |
+| ----------------- | --------------------- | ------- |
+| `port`            | `2222`                | Listen port. |
+| `bind`            | `127.0.0.1`           | Listen address. The installer writes `0.0.0.0`. |
+| `host_key`        | `rossh_hostkey.der`   | PKCS#8 DER ed25519 host key (§4.1). |
+| `authorized_keys` | *(empty)*             | One public key per line; empty refuses every login. |
+| `sftp_root`       | *(empty)*             | Starting directory for the SFTP subsystem; empty disables it. |
+| `log_file`        | *(empty)*             | Append logs here; empty means the console only. |
+| `log_level`       | `info`                | `error`, `warn`, `info`, `debug`. |
 
-Deliberate deviations, each to be documented in the README:
+Precedence: built-in defaults, then the config file, then the command line. The
+existing flags (`--bind`, `--authorized-keys`, `--sftp-root`, and a positional
+port and host key) all still work and override the file.
 
-- `AllowHost` defaults to deny-unless-allowed; wSSH ships `AllowHost=1` (anyone).
-- No plaintext passwords in `user_*.ini` — wSSH rewrites a plaintext password
-  into a salted SHA-1 on first connect; we use a modern hash and never store
-  plaintext.
-- `ShellCmd` defaults to the real path (`C:\ReactOS\system32\cmd.exe`), since
-  `C:\Windows` does not exist on ReactOS.
+Unknown keys and malformed values are reported and skipped, never fatal — a
+stray line must not take the server down.
+
+Per-user policy — `authorized_keys` per account, SFTP-only users — is M4c, in
+its own module (`src/policy.c`), not in this file.
 
 ## 6. Cryptography and randomness
 
@@ -200,11 +208,12 @@ channels, and the SFTP *protocol*. What is left is ours:
 | `src/session.c`        | the server: wolfSSH callbacks, `exec` via `CreateProcess` + pipes, exit status |
 | `src/client.c`         | the client: connect, verify the host key (trust on first use), authenticate, run one command, report its exit status |
 | `src/b64.c`            | one-line base64 for `.pub` lines and `known_hosts` entries |
-| `src/policy.c`         | ini parsing (wSSH-compatible), host filters, user lookup, permission flags |
+| `src/config.c`         | the `key = value` config file (§5) |
+| `src/policy.c`         | per-user policy: keys per account, SFTP-only users (M4c) |
 | `src/rng.c`            | the entropy pool (§6.1), wired into wolfCrypt's seed callback |
 | `src/sftp_backend.c`   | Win32 file access behind the SFTP/SCP protocol layer (P1) |
 | `src/service.c`        | SCM install/run/stop |
-| `src/log.c`            | file and event log, wSSH's message ids where they map |
+| `src/log.c`            | leveled logging to the console and an optional file |
 | `third_party/wolfssl`  | pinned submodule — crypto |
 | `third_party/wolfssh`  | pinned submodule — SSH implementation |
 
@@ -258,7 +267,10 @@ invocations need `%SystemRoot%\system32` prepended.
 | M2 | Authentication + exec channel | done — `tools/m2-check.sh` passes: an authorised key logs in, an unauthorised one is refused, and `exec` returns stdout and the command's exit status unchanged |
 | M3 | SFTP v3; the root is a starting directory | done — `scp` works **without** `-O`, both ways, byte for byte, on ReactOS and Windows 7; `tools/m3-check.sh` passes |
 | M3.5 | Client: `ssh [user@]host <command>` from ReactOS | done — the same binary answers to `ssh`, runs one command against our own server and against a stock OpenSSH server, and returns its exit status. `tools/client-check.sh` passes; verified on ReactOS 0.4.16 talking to OpenSSH 10 |
-| M4 | Service, config, logging | runs as a service next to wSSH, with per-user policy |
+| M4a | Config and logging | done — a `rossh.conf` named with `--config` sets port, bind, host key, authorised keys, SFTP root and log file/level; the command line overrides it (`src/config.c`, `src/log.c`) |
+| M4b | Service | runs under the SCM as LocalSystem, auto-start, `--install` / `--uninstall` |
+| M4c | Per-user policy | keys per account, SFTP-only users |
+| M4d | Setup | `rossh setup`: host key, config, service, firewall — usable without wSSH |
 | M5 | Optional: tunnels | — |
 
 ## 11. Risks and open questions

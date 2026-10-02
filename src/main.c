@@ -21,6 +21,8 @@
 #include <time.h>
 
 #include "b64.h"
+#include "config.h"
+#include "log.h"
 #include "rng.h"
 #include "session.h"
 #include "client.h"
@@ -45,9 +47,6 @@
         #define INVALID_SOCKET (-1)
     #endif
 #endif
-
-#define DEFAULT_PORT 2222
-#define DEFAULT_KEY  "rossh_hostkey.der"
 
 static const char server_banner[] = "rossh M1";
 
@@ -330,15 +329,12 @@ static int client_requested(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
-    int          port = DEFAULT_PORT;
+    config_t     cfg;
     int          once = 0;                  /* --once: serve one connection, then exit */
-    const char  *key_path = DEFAULT_KEY;
-    const char  *bind_addr = "127.0.0.1";   /* loopback unless asked otherwise */
     const char  *genkey_path = NULL;
-    const char  *authkeys_path = NULL;
-    const char  *sftp_root = NULL;
     const char  *port_arg = NULL;
     const char  *key_arg  = NULL;
+    const char  *config_path = NULL;
     int          i;
     WOLFSSH_CTX *ctx;
     socket_t     lfd;
@@ -359,43 +355,71 @@ int main(int argc, char **argv)
 #else
     dup2(1, 2);
 #endif
-    fprintf(stderr, "rossh: start\n");
 
-    /* Arguments first. Everything after this point can block, so a trace option
-     * — or a simple typo — has to be handled before any of it. */
+    /* Configuration first: defaults, then a file if one was named, then the
+     * command line. --config is picked out here so that the log can be opened
+     * before anything else has something to say. */
+    config_defaults(&cfg);
     for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--genkey") == 0 && i + 1 < argc)
+        if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+            config_path = argv[i + 1];
+            break;
+        }
+    }
+    config_load(&cfg, config_path);
+
+    log_open(cfg.log_file);
+    if (log_set_level(cfg.log_level) != 0) {
+        log_warn("unknown log_level '%s', keeping info", cfg.log_level);
+        log_set_level("info");
+    }
+    log_info("rossh: start");
+
+    /* Arguments. Everything after this point can block, so a trace option — or
+     * a simple typo — has to be handled before any of it. The command line wins
+     * over the config file. */
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--config") == 0 && i + 1 < argc)
+            i++;                   /* already applied above */
+        else if (strcmp(argv[i], "--genkey") == 0 && i + 1 < argc)
             genkey_path = argv[++i];
         else if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc)
-            bind_addr = argv[++i];
+            snprintf(cfg.bind, sizeof cfg.bind, "%s", argv[++i]);
         else if (strcmp(argv[i], "--trace") == 0 && i + 1 < argc)
             trace_open(argv[++i]);
         else if (strcmp(argv[i], "--authorized-keys") == 0 && i + 1 < argc)
-            authkeys_path = argv[++i];
+            snprintf(cfg.authorized_keys, sizeof cfg.authorized_keys,
+                     "%s", argv[++i]);
         else if (strcmp(argv[i], "--sftp-root") == 0 && i + 1 < argc)
-            sftp_root = argv[++i];
+            snprintf(cfg.sftp_root, sizeof cfg.sftp_root, "%s", argv[++i]);
         else if (strcmp(argv[i], "--once") == 0)
             once = 1;
-        else if (port_arg == NULL)
+        else if (argv[i][0] != '-' && port_arg == NULL)
             port_arg = argv[i];
-        else if (key_arg == NULL)
-            key_arg = argv[i];
+        else if (argv[i][0] != '-' && key_arg == NULL)
+            key_arg  = argv[i];
         else {
-            fprintf(stderr, "rossh: unexpected argument '%s'\n", argv[i]);
+            log_error("unexpected argument '%s'", argv[i]);
             return 1;
         }
     }
-    if (port_arg != NULL)
-        port = atoi(port_arg);
+    if (port_arg != NULL) {
+        int p = atoi(port_arg);
+
+        if (p > 0 && p < 65536)
+            cfg.port = p;
+        else
+            log_warn("ignoring the port argument '%s'", port_arg);
+    }
     if (key_arg != NULL)
-        key_path = key_arg;
+        snprintf(cfg.host_key, sizeof cfg.host_key, "%s", key_arg);
     trace("args parsed");
 
 #ifdef _WIN32
     {
         WSADATA wsa;
         if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-            fprintf(stderr, "rossh: WSAStartup failed\n");
+            log_error("WSAStartup failed");
             return 1;
         }
     }
@@ -418,7 +442,7 @@ int main(int argc, char **argv)
 
     ctx = wolfSSH_CTX_new(WOLFSSH_ENDPOINT_SERVER, NULL);
     if (ctx == NULL) {
-        fprintf(stderr, "rossh: wolfSSH_CTX_new failed\n");
+        log_error("wolfSSH_CTX_new failed");
         return 1;
     }
 
@@ -435,36 +459,36 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (load_host_key(ctx, key_path) != 0)
+    if (load_host_key(ctx, cfg.host_key) != 0)
         return 1;
-    printf("host key '%s' loaded\n", key_path);
+    log_info("host key '%s' loaded", cfg.host_key);
     trace("host key loaded");
 
-    if (authkeys_path != NULL) {
-        if (keylist_load(&g_keys, authkeys_path) != 0) {
-            printf("rossh: cannot read authorised keys '%s'\n", authkeys_path);
+    if (cfg.authorized_keys[0] != '\0') {
+        if (keylist_load(&g_keys, cfg.authorized_keys) != 0) {
+            log_error("cannot read authorised keys '%s'", cfg.authorized_keys);
             return 1;
         }
-        printf("authorised keys: %d loaded from %s\n",
-               g_keys.count, authkeys_path);
+        log_info("authorised keys: %d loaded from %s",
+                 g_keys.count, cfg.authorized_keys);
     }
     else {
-        printf("rossh: no --authorized-keys given, every login is refused\n");
+        log_warn("no authorized_keys configured, every login is refused");
     }
 
-    lfd = listen_on(bind_addr, port);
+    lfd = listen_on(cfg.bind, cfg.port);
     if (lfd == INVALID_SOCKET) {
-        perror("rossh: bind/listen");
+        log_error("bind/listen failed on %s:%d (%d)",
+                  cfg.bind, cfg.port, last_socket_error());
         return 1;
     }
 
-    printf("rossh listening on %s:%d\n", bind_addr, port);
+    log_info("rossh listening on %s:%d", cfg.bind, cfg.port);
     trace("listening");
-    printf("  kex      %s\n", algo_kex);
-    printf("  host key %s\n", algo_hostkey);
-    printf("  cipher   %s\n", algo_cipher);
-    printf("  mac      %s\n", algo_mac);
-    fflush(stdout);
+    log_info("  kex      %s", algo_kex);
+    log_info("  host key %s", algo_hostkey);
+    log_info("  cipher   %s", algo_cipher);
+    log_info("  mac      %s", algo_mac);
 
     {
         unsigned failures = 0;
@@ -483,10 +507,10 @@ int main(int argc, char **argv)
                  * is no out-of-band way back in. Pause, and give up after a run
                  * of failures instead of burning the machine. */
                 if (++failures == 1)
-                    fprintf(stderr, "rossh: accept failed (%d), backing off\n",
-                            last_socket_error());
+                    log_warn("accept failed (%d), backing off",
+                             last_socket_error());
                 if (failures >= 30) {
-                    fprintf(stderr, "rossh: accept keeps failing, giving up\n");
+                    log_error("accept keeps failing, giving up");
                     break;
                 }
                 pause_ms(200);
@@ -495,8 +519,7 @@ int main(int argc, char **argv)
             failures = 0;
             trace("connection accepted");
 
-            printf("--- connection from %s\n", inet_ntoa(peer.sin_addr));
-            fflush(stdout);
+            log_info("--- connection from %s", inet_ntoa(peer.sin_addr));
 
             ssh = wolfSSH_new(ctx);
             if (ssh == NULL) {
@@ -509,15 +532,14 @@ int main(int argc, char **argv)
 
             wolfSSH_set_fd(ssh, (WS_SOCKET_T)cfd);
             rc = wolfSSH_accept(ssh);
-            printf("wolfSSH_accept -> %d\n", rc);
-            fflush(stdout);
+            log_debug("wolfSSH_accept -> %d", rc);
 
             /* A client that asked for the sftp subsystem is handed to the SFTP
              * server here — wolfSSH_accept() reports that with WS_SFTP_COMPLETE,
              * having already run the version exchange. exec requests were
              * answered by their channel callback. */
             if (rc == WS_SFTP_COMPLETE) {
-                session_sftp(ssh, sftp_root);
+                session_sftp(ssh, cfg.sftp_root[0] != '\0' ? cfg.sftp_root : NULL);
             }
 
             /* Close the session properly. Without this the socket is dropped as
@@ -528,8 +550,7 @@ int main(int argc, char **argv)
                 if (rc != WS_WANT_READ && rc != WS_WANT_WRITE)
                     break;
             }
-            printf("wolfSSH_shutdown -> %d\n", rc);
-            fflush(stdout);
+            log_debug("wolfSSH_shutdown -> %d", rc);
 
             wolfSSH_free(ssh);
             close_socket(cfd);
