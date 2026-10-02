@@ -8,12 +8,18 @@
 #      algorithm flags, and is refused there (serving sessions is M2).
 #
 #   tools/m1-check.sh [port]
+#
+# The client key below is generated here rather than taken from the user's
+# ~/.ssh: the point is that the client reaches publickey authentication and is
+# turned away, which cannot be observed on a machine that has no identity to
+# offer at all (a CI runner, for one).
 
 set -u
 
 port=${1:-2222}
 root=$(cd "$(dirname "$0")/.." && pwd)
-log=$(mktemp)
+work=$(mktemp -d)
+log="$work/server.log"
 server=""
 fail=0
 
@@ -22,7 +28,7 @@ cleanup() {
         kill "$server" 2>/dev/null
         wait "$server" 2>/dev/null
     fi
-    rm -f "$log"
+    rm -rf "$work"
 }
 trap cleanup EXIT INT TERM
 
@@ -78,18 +84,34 @@ reject 'hmac-sha1'             'hmac-sha1'
 reject 'CBC'                   'aes256-cbc'
 
 echo "=== a stock client, with no -o algorithm flags ==="
+ssh-keygen -q -t ed25519 -N "" -f "$work/id" || exit 2
+
+# IdentitiesOnly, so only the key above is offered and the result does not
+# depend on what the machine running this happens to have in ~/.ssh.
 out=$(ssh -vvv -p "$port" \
         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o BatchMode=yes -o ConnectTimeout=5 -o NumberOfPasswordPrompts=0 \
+        -o IdentitiesOnly=yes -i "$work/id" \
         testuser@127.0.0.1 true 2>&1)
 
 printf '%s\n' "$out" | grep -E "kex: (algorithm|host key algorithm|server->client cipher|server->client mac)"
 
+# Both halves of the criterion: the server saw a publickey attempt, so the
+# client really did reach authentication, and the client was refused there.
+if grep -q 'publickey offered' "$log"; then
+    echo "  ok: the server reached publickey authentication"
+else
+    echo "  FAIL: the server never logged a publickey attempt"
+    fail=1
+fi
+
 case "$out" in
     *"Permission denied"*)
-        echo "  ok: reached authentication, refused as intended" ;;
+        echo "  ok: refused as intended" ;;
     *)
         echo "  FAIL: expected an authentication refusal"
+        echo "--- what the client said ---"
+        printf '%s\n' "$out" | grep -v '^debug[23]:'
         fail=1 ;;
 esac
 

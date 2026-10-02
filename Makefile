@@ -12,7 +12,7 @@ CC      ?= gcc
 WINCC   ?= i686-w64-mingw32-gcc
 JOBS    ?= 8
 NSIS    ?= makensis
-VERSION ?= 0.4.0
+VERSION ?= 0.5.0
 
 FLAVOR  ?= native
 BUILD   ?= build/$(FLAVOR)

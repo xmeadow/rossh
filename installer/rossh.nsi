@@ -9,7 +9,7 @@
 ; Silent test: rossh-setup.exe /S /D=C:\rossh
 
 !ifndef VERSION
-    !define VERSION "0.4.0"
+    !define VERSION "0.5.0"
 !endif
 
 ; Repository root, passed by the Makefile (-DROOT=...). The fallback is for a
