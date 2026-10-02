@@ -28,13 +28,20 @@ SRC     = $(wildcard src/*.c)
 CFLAGS  = -std=c11 -Wall -Wextra -O2 -DWC_RNG_SEED_CB -D_POSIX_C_SOURCE=200809L \
           -I$(PREFIX)/include -Ibuild/shim
 
-# DEBUG=1 turns on wolfSSH's internal tracing. The dependencies have to be built
-# with the same define or the calls compile out:
-#   make deps EXTRA_CPPFLAGS=-DDEBUG_WOLFSSH && make DEBUG=1
+# DEBUG=1 turns on wolfSSH's internal tracing. The define has to reach our
+# translation units *and* the vendored libraries, which are built separately —
+# so it goes into CFLAGS and into the dependency build (EXTRA_CPPFLAGS) at the
+# same time. Otherwise the two-step path loses it: `make DEBUG=1` re-runs
+# build-deps.sh (the .deps stamp is older than the script) without the define,
+# silently rebuilding the dependencies clean and compiling every WLOG out.
+# One `make DEBUG=1` is all it takes; it rebuilds the dependencies if they were
+# built without tracing.
 DEBUG ?= 0
 ifeq ($(DEBUG),1)
 CFLAGS += -DDEBUG_WOLFSSH
+DEP_CPPFLAGS += -DDEBUG_WOLFSSH
 endif
+DEP_CPPFLAGS += $(EXTRA_CPPFLAGS)
 
 LDLIBS_native = -lwolfssh -lwolfssl -lm
 # advapi32: RtlGenRandom in src/rng.c. No crypt32: wolfSSL is built
@@ -49,7 +56,7 @@ STRIP_FLAG_win32  = -s
 STRIP_FLAG        = $(STRIP_FLAG_$(FLAVOR))
 LDLIBS        = $(LDLIBS_$(FLAVOR))
 
-.PHONY: all win32 clean deps
+.PHONY: all win32 clean deps FORCE_DEPS
 
 all:
 	@$(MAKE) --no-print-directory binary
@@ -57,17 +64,42 @@ all:
 win32:
 	@$(MAKE) --no-print-directory FLAVOR=win32 CC_BIN=$(WINCC) EXE=.exe binary
 
-binary: $(PREFIX)/.deps $(SRC)
+# The dependencies are rebuilt only when the flag set changes — including the
+# tracing define that DEBUG=1 adds. make cannot see a variable change, so the
+# flags are kept in a stamp file and compared here, at parse time: when they
+# match, the dependencies are left alone; when they differ (or nothing is built
+# yet), `binary` takes the phony rule below as a prerequisite, which rebuilds the
+# libraries once and records the new flags. (`binary` itself is phony and always
+# relinks the application; this only decides whether the libraries are rebuilt.)
+DEPS_STAMP     = $(BUILD)/.depflags
+DEPS_FLAGS_NEW = $(DEP_CPPFLAGS)
+DEPS_FLAGS_OLD = $(shell cat $(DEPS_STAMP) 2>/dev/null)
+
+ifneq ($(DEPS_FLAGS_NEW),$(DEPS_FLAGS_OLD))
+DEPS_PREREQ = FORCE_DEPS
+endif
+ifeq ($(wildcard $(PREFIX)/.deps),)
+DEPS_PREREQ = FORCE_DEPS
+endif
+
+binary: $(DEPS_PREREQ) $(SRC)
 	$(CC_BIN) $(CFLAGS) $(SRC) -o rossh$(EXE) $(STRIP_FLAG) -L$(PREFIX)/lib $(LDLIBS)
 	@echo "built rossh$(EXE)  [$(FLAVOR)]"
 
-$(PREFIX)/.deps: tools/build-deps.sh
-	JOBS=$(JOBS) EXTRA_CPPFLAGS="$(EXTRA_CPPFLAGS)" tools/build-deps.sh $(FLAVOR)
-	@touch $@
+# A prerequisite only when the flags changed or nothing is built yet, so it can
+# never force a relink on an otherwise up-to-date tree.
+FORCE_DEPS:
+	@mkdir -p $(BUILD)
+	JOBS=$(JOBS) EXTRA_CPPFLAGS="$(DEP_CPPFLAGS)" tools/build-deps.sh $(FLAVOR)
+	@printf '%s' "$(DEP_CPPFLAGS)" > $(DEPS_STAMP)
+	@touch $(PREFIX)/.deps
 
-# Rebuild the dependencies even if they are already there.
+# Rebuild the dependencies even if the flags already match.
 deps:
-	JOBS=$(JOBS) EXTRA_CPPFLAGS="$(EXTRA_CPPFLAGS)" tools/build-deps.sh $(FLAVOR)
+	JOBS=$(JOBS) EXTRA_CPPFLAGS="$(DEP_CPPFLAGS)" tools/build-deps.sh $(FLAVOR)
+	@mkdir -p $(BUILD)
+	@printf '%s' "$(DEP_CPPFLAGS)" > $(DEPS_STAMP)
+	@touch $(PREFIX)/.deps
 
 clean:
 	rm -rf build rossh rossh.exe

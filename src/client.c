@@ -481,6 +481,16 @@ done:
     return status;
 }
 
+#ifdef DEBUG_WOLFSSH
+/* wolfSSH's default logging callback writes to stdout, which for a client is the
+ * remote command's output. Send the protocol trace to stderr instead. */
+static void cli_log_cb(enum wolfSSH_LogLevel level, const char *const msg)
+{
+    (void)level;
+    fprintf(stderr, "wolfSSH: %s\n", msg);
+}
+#endif
+
 static void client_usage(void)
 {
     fprintf(stderr,
@@ -595,6 +605,11 @@ int client_main(int argc, char **argv)
      * it the first RNG call deadlocks on ReactOS (a zeroed mutex is harmless on
      * Linux, which is why the native build never missed it). */
     rng_start();
+
+#ifdef DEBUG_WOLFSSH
+    wolfSSH_SetLoggingCb(cli_log_cb);
+    wolfSSH_Debugging_ON();
+#endif
 
     return session_run(&o);
 }
