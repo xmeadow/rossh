@@ -109,11 +109,30 @@ static int own_path(char *out, DWORD cap)
     return 0;
 }
 
+/* Bring the service up if it is not already running. */
+static void start_service(SC_HANDLE svc)
+{
+    SERVICE_STATUS st;
+
+    if (QueryServiceStatus(svc, &st) && st.dwCurrentState != SERVICE_STOPPED) {
+        log_info("service is already running");
+        return;
+    }
+    if (StartServiceA(svc, 0, NULL))
+        log_info("service started");
+    else if (GetLastError() == ERROR_SERVICE_ALREADY_RUNNING)
+        log_info("service was already running");
+    else
+        log_warn("could not start the service (%lu); try `net start %s`",
+                 GetLastError(), ROSSH_SERVICE_NAME);
+}
+
 int service_install(const char *config_path)
 {
     SC_HANDLE scm, svc;
     char      exe[MAX_PATH];
     char      bin[MAX_PATH * 2];
+    DWORD     err;
 
     if (own_path(exe, sizeof exe) != 0)
         return 1;
@@ -131,13 +150,44 @@ int service_install(const char *config_path)
         return 1;
     }
 
+    svc = OpenServiceA(scm, ROSSH_SERVICE_NAME, SERVICE_ALL_ACCESS);
+    if (svc != NULL) {
+        /* Already installed — the update path. Keep the service, repoint its
+         * command line at the binary now on disk, and start it. Deleting and
+         * recreating it is what used to trap us: on ReactOS a DeleteService on a
+         * service that still has an open handle only marks it for deletion, the
+         * name stays taken until the next boot, and CreateService then fails with
+         * 1072 — a reboot that an update must never require. */
+        if (!ChangeServiceConfigA(svc, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE,
+                                  SERVICE_NO_CHANGE, bin, NULL, NULL, NULL, NULL,
+                                  NULL, NULL)) {
+            log_warn("could not update the service command line (%lu)",
+                     GetLastError());
+        }
+        else {
+            log_info("service '%s' already installed; command line updated",
+                     ROSSH_SERVICE_NAME);
+            log_info("  command  %s", bin);
+        }
+        start_service(svc);
+        CloseServiceHandle(svc);
+        CloseServiceHandle(scm);
+        return 0;
+    }
+
+    err = GetLastError();
+    if (err != ERROR_SERVICE_DOES_NOT_EXIST) {
+        log_error("OpenService failed (%lu)", err);
+        CloseServiceHandle(scm);
+        return 1;
+    }
+
     svc = CreateServiceA(scm, ROSSH_SERVICE_NAME, ROSSH_SERVICE_DISPLAY,
                          SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
                          SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
                          bin, NULL, NULL, NULL, NULL /* LocalSystem */, NULL);
     if (svc == NULL) {
-        DWORD err = GetLastError();
-
+        err = GetLastError();
         if (err == ERROR_SERVICE_EXISTS) {
             log_info("service '%s' is already installed", ROSSH_SERVICE_NAME);
             CloseServiceHandle(scm);
@@ -147,23 +197,84 @@ int service_install(const char *config_path)
         CloseServiceHandle(scm);
         return 1;
     }
-    CloseServiceHandle(svc);
 
     log_info("installed service '%s' (auto-start, LocalSystem)", ROSSH_SERVICE_NAME);
     log_info("  command  %s", bin);
+    start_service(svc);
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+    return 0;
+}
 
-    /* Bring it up now, so the machine is serving without a reboot. */
-    svc = OpenServiceA(scm, ROSSH_SERVICE_NAME, SERVICE_START);
-    if (svc != NULL) {
-        if (StartServiceA(svc, 0, NULL))
-            log_info("service started");
-        else if (GetLastError() == ERROR_SERVICE_ALREADY_RUNNING)
-            log_info("service was already running");
-        else
-            log_warn("could not start the service (%lu); try `net start %s`",
-                     GetLastError(), ROSSH_SERVICE_NAME);
-        CloseServiceHandle(svc);
+/* Poll until the service reports STOPPED, so a delete or a file replace does not
+ * race the shutdown. Returns 1 when it stopped, 0 on timeout. */
+static int wait_stopped(SC_HANDLE svc)
+{
+    SERVICE_STATUS st;
+    int            i;
+
+    for (i = 0; i < 100; i++) {
+        if (!QueryServiceStatus(svc, &st))
+            return 0;
+        if (st.dwCurrentState == SERVICE_STOPPED)
+            return 1;
+        Sleep(100);
     }
+    return 0;
+}
+
+int service_stop(void)
+{
+    SC_HANDLE      scm, svc;
+    SERVICE_STATUS st;
+    DWORD          err;
+
+    scm = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+    if (scm == NULL) {
+        log_error("OpenSCManager failed (%lu) — run this as an administrator",
+                  GetLastError());
+        return 1;
+    }
+
+    svc = OpenServiceA(scm, ROSSH_SERVICE_NAME,
+                       SERVICE_STOP | SERVICE_QUERY_STATUS);
+    if (svc == NULL) {
+        err = GetLastError();
+        CloseServiceHandle(scm);
+        if (err == ERROR_SERVICE_DOES_NOT_EXIST) {
+            log_info("service '%s' is not installed", ROSSH_SERVICE_NAME);
+            return 0;                   /* nothing to stop */
+        }
+        log_error("OpenService failed (%lu)", err);
+        return 1;
+    }
+
+    if (QueryServiceStatus(svc, &st) && st.dwCurrentState == SERVICE_STOPPED) {
+        log_info("service '%s' is already stopped", ROSSH_SERVICE_NAME);
+        CloseServiceHandle(svc);
+        CloseServiceHandle(scm);
+        return 0;
+    }
+
+    if (ControlService(svc, SERVICE_CONTROL_STOP, &st))
+        log_info("stopping service '%s'", ROSSH_SERVICE_NAME);
+    else if (GetLastError() != ERROR_SERVICE_NOT_ACTIVE) {
+        log_error("could not stop the service (%lu)", GetLastError());
+        CloseServiceHandle(svc);
+        CloseServiceHandle(scm);
+        return 1;
+    }
+
+    if (!wait_stopped(svc)) {
+        log_error("service '%s' did not reach the stopped state",
+                  ROSSH_SERVICE_NAME);
+        CloseServiceHandle(svc);
+        CloseServiceHandle(scm);
+        return 1;
+    }
+
+    log_info("service stopped");
+    CloseServiceHandle(svc);
     CloseServiceHandle(scm);
     return 0;
 }
@@ -196,6 +307,11 @@ int service_uninstall(void)
     else
         log_warn("could not stop the service (%lu)", GetLastError());
 
+    /* Wait for STOPPED before deleting: a delete on a still-stopping service
+     * only marks it for deletion, and on ReactOS that lasts until the next boot
+     * (CreateService then answers 1072). */
+    wait_stopped(svc);
+
     if (DeleteService(svc))
         log_info("removed service '%s'", ROSSH_SERVICE_NAME);
     else
@@ -216,6 +332,12 @@ int service_install(const char *config_path)
 }
 
 int service_uninstall(void)
+{
+    fprintf(stderr, "rossh: services are a Windows concept\n");
+    return 1;
+}
+
+int service_stop(void)
 {
     fprintf(stderr, "rossh: services are a Windows concept\n");
     return 1;

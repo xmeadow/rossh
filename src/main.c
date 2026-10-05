@@ -502,6 +502,7 @@ int main(int argc, char **argv)
     int          service_mode = 0;          /* the service controller's child */
     int          install_mode = 0;
     int          uninstall_mode = 0;
+    int          stop_mode = 0;
     const char  *genkey_path = NULL;
     const char  *port_arg = NULL;
     const char  *key_arg  = NULL;
@@ -576,6 +577,8 @@ int main(int argc, char **argv)
         }
         else if (strcmp(argv[i], "--uninstall") == 0)
             uninstall_mode = 1;
+        else if (strcmp(argv[i], "--stop") == 0)
+            stop_mode = 1;
         else if (argv[i][0] != '-' && port_arg == NULL)
             port_arg = argv[i];
         else if (argv[i][0] != '-' && key_arg == NULL)
@@ -597,10 +600,12 @@ int main(int argc, char **argv)
         snprintf(cfg.host_key, sizeof cfg.host_key, "%s", key_arg);
     trace("args parsed");
 
-    if (install_mode || uninstall_mode) {
+    if (install_mode || uninstall_mode || stop_mode) {
         if (install_mode)
             return service_install(config_path);
-        return service_uninstall();
+        if (uninstall_mode)
+            return service_uninstall();
+        return service_stop();
     }
 
 #ifdef _WIN32

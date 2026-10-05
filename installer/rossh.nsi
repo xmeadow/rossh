@@ -109,7 +109,35 @@ FunctionEnd
 
 Section "rossh" SecInstall
     SetOutPath "$INSTDIR"
-    File "${ROOT}/rossh.exe"
+
+    ; Replace a running binary without a reboot.
+    ;
+    ; A running .exe can be neither overwritten nor renamed on ReactOS, and the
+    ; service must not be deleted to unlock it: DeleteService on a service that
+    ; still has an open handle only marks it for deletion, the name stays taken
+    ; until the next boot, and the new install then fails with 1072. So the new
+    ; binary is staged under a temporary name and *it* stops the service — it is
+    ; the version that understands --stop, whichever version is installed now.
+    ; Only then is it copied over the old one. `rossh setup` below restarts the
+    ; service with the binary that is now on disk.
+    File "/oname=rossh.new.exe" "${ROOT}/rossh.exe"
+
+    ${If} ${FileExists} "$INSTDIR\rossh.exe"
+        DetailPrint "Stopping a running rossh service ..."
+        nsExec::ExecToLog '"$INSTDIR\rossh.new.exe" --stop'
+        Pop $0
+        ${If} $0 != 0
+            MessageBox MB_ICONEXCLAMATION "Could not stop the running rossh service (exit $0).$\r$\nIf the update does not take effect, stop the service by hand and run the installer again."
+        ${EndIf}
+    ${EndIf}
+
+    CopyFiles /SILENT "$INSTDIR\rossh.new.exe" "$INSTDIR\rossh.exe"
+    ; Only drop the staged copy once the real one is in place; a failed copy
+    ; leaves it behind, so the next attempt still has a binary to work with.
+    ${If} ${FileExists} "$INSTDIR\rossh.exe"
+        Delete "$INSTDIR\rossh.new.exe"
+    ${EndIf}
+
     File "${ROOT}/LICENSE"
     File "${ROOT}/README.md"
 
@@ -181,6 +209,7 @@ Section "Uninstall"
     Pop $0
 
     Delete "$INSTDIR\rossh.exe"
+    Delete "$INSTDIR\rossh.new.exe"
     Delete "$INSTDIR\LICENSE"
     Delete "$INSTDIR\README.md"
     Delete "$INSTDIR\uninst.exe"

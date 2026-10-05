@@ -21,8 +21,18 @@
  * `rossh --service` is what the controller launches. Needs administrator rights;
  * the service is started right away. Returns 0 on success (already installed
  * counts as success).
+ *
+ * An already-installed service is *updated*, not replaced: its command line is
+ * repointed at the binary now on disk and it is started. It is never deleted —
+ * see service_stop for why deleting a live service is the thing to avoid.
  */
 int service_install(const char *config_path);
+
+/* Stop the service if it is running, and wait until it has actually reached
+ * SERVICE_STOPPED. Returns 0 when it is stopped (including when it was not
+ * installed or not running). This is what lets the installer replace a running
+ * binary without a reboot. */
+int service_stop(void);
 
 /* Stop the service if it is running, then delete it. Returns 0 on success. */
 int service_uninstall(void);
