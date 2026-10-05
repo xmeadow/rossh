@@ -313,8 +313,6 @@ invocations need `%SystemRoot%\system32` prepended.
   (`ssh -q`) says nothing; others remark on it. Sending the disconnect where it
   seemed obvious truncated the final packets and lost the exit status, so this
   needs a gentler teardown (let the client close first) rather than a one-liner.
-- **One connection at a time.** The session state is a single global, which the
-  single-threaded accept loop depends on (see §7).
 - **The client trusts on first use, and speaks only our suite.** Its `known_hosts`
   is a plain two-column file keyed by the host string typed on the command line
   (no hashing, no `[host]:port` form). Keys are `rossh --genkey` PKCS#8 DER

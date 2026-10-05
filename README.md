@@ -53,10 +53,22 @@ rossh setup [--key <public-key-file>] [--port <n>] [--no-firewall] [dir]
 key next to the config. On ReactOS the firewall step is a no-op (there is no
 `netsh`); the service is still registered.
 
+### Updating
+
+Run the same `rossh-setup.exe` over an existing install. It stops the running
+service, replaces the binary and starts it again — no reboot, and your config,
+host key and authorised keys are kept. The same happens from a console:
+
+```
+rossh --stop        # stop the service (waits until it has really stopped)
+rossh setup <dir>   # point the service at the new binary and start it
+```
+
 ## Using it
 
 The three commands above are the whole server-side story. `exec` passes back the
-real exit status, and `scp`/SFTP paths are rooted at `C:\`.
+real exit status, and `scp`/SFTP paths are rooted at `C:\`. Several clients can be
+connected at once; each session runs on its own thread.
 
 The same binary is the client. Rename or copy it to `ssh`, or pass `--client`:
 
@@ -121,7 +133,7 @@ every connection, so adding or removing a key takes effect on the next login.
 rossh [--config <file>] [--bind <addr>] [--authorized-keys <file>]
       [--sftp-root <dir>] [--once] [<port> <host-key>]
 rossh setup [--key <file>] [--port <n>] [--no-firewall] [dir]
-rossh --install [config] | --uninstall | --service
+rossh --install [config] | --uninstall | --stop | --service
 rossh --genkey <path>
 ssh   [-p port] [-i key] [-l user] [--known-hosts file] [--insecure] [-v]
       [user@]host [command]
@@ -135,7 +147,6 @@ ssh   [-p port] [-i key] [-l user] [--known-hosts file] [--insecure] [-v]
 - **Authentication is by key only, and the user name is not checked** — any name
   is accepted as long as the key is authorised. Per-user policy is not
   implemented.
-- The server handles **one session at a time**.
 - On Windows and ReactOS the **interactive shell is line-oriented**: a prompt and
   a command loop, with echo and editing done by the server. There is no ConPTY
   there, so full-screen programs are out of scope. On Linux the shell runs on a
