@@ -21,6 +21,7 @@
 #define CONFIG_DEFAULT_MAX_CONN    32   /* concurrent sessions; 0 = unlimited */
 #define CONFIG_DEFAULT_LOGIN_TIMEOUT 30 /* seconds to authenticate; 0 = off */
 #define CONFIG_DEFAULT_IDLE_TIMEOUT  0  /* idle seconds before a shell/SFTP ends; 0 = off */
+#define CONFIG_DEFAULT_LOG_MAX   (1024L * 1024L) /* rotate the log file at 1 MiB; 0 = off */
 
 #define CONFIG_PATH_MAX 512
 
@@ -35,6 +36,7 @@ typedef struct {
     int  max_connections;                   /* concurrent sessions; 0 = unlimited */
     int  login_timeout;                     /* seconds to authenticate; 0 = off */
     int  idle_timeout;                      /* seconds idle before a session ends; 0 = off */
+    int  log_max_size;                       /* rotate log_file at this many bytes; 0 = off */
 } config_t;
 
 /* The built-in defaults: loopback, port 2222, no keys, no SFTP. */

@@ -24,6 +24,7 @@ void config_defaults(config_t *cfg)
     cfg->max_connections = CONFIG_DEFAULT_MAX_CONN;
     cfg->login_timeout   = CONFIG_DEFAULT_LOGIN_TIMEOUT;
     cfg->idle_timeout    = CONFIG_DEFAULT_IDLE_TIMEOUT;
+    cfg->log_max_size    = (int)CONFIG_DEFAULT_LOG_MAX;
     /* authorized_keys, sftp_root and log_file default to empty. */
 }
 
@@ -162,6 +163,15 @@ void config_load(config_t *cfg, const char *path)
                         path, lineno, val);
             else
                 cfg->idle_timeout = n;
+        }
+        else if (str_ieq(key, "log_max_size")) {
+            int n = parse_count(val);
+
+            if (n < 0)
+                fprintf(stderr, "rossh: %s:%d: bad log_max_size '%s'\n",
+                        path, lineno, val);
+            else
+                cfg->log_max_size = n;
         }
         else
             fprintf(stderr, "rossh: %s:%d: unknown key '%s', skipped\n",

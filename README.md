@@ -112,6 +112,7 @@ without it, the built-in defaults stand.
 | `sftp_root` | *(none)* | starting directory for SFTP; empty disables it |
 | `log_file` | *(none)* | append logs here; empty means the console |
 | `log_level` | `info` | `error`, `warn`, `info`, `debug` |
+| `log_max_size` | `1048576` | rotate `log_file` to `.1` at this many bytes; `0` = never |
 | `max_connections` | `32` | concurrent sessions; `0` = unlimited |
 | `login_timeout` | `30` | seconds to authenticate before the connection is dropped; `0` = off |
 | `idle_timeout` | `0` | seconds a shell/SFTP session may sit idle before it ends; `0` = off |
@@ -124,6 +125,7 @@ authorized_keys = C:\Program Files\rossh\authorized_keys
 sftp_root       = C:\Program Files\rossh
 log_file        = C:\Program Files\rossh\rossh.log
 log_level       = info
+log_max_size    = 1048576
 max_connections = 32
 login_timeout   = 30
 idle_timeout    = 0

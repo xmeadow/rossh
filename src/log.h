@@ -6,7 +6,9 @@
  * messages still reach an existing `cmd.exe` pipe and the test scripts, while a
  * service, which has no console, still gets the file.
  *
- * Single-threaded, like the rest of the server today: no locking.
+ * The file is guarded by a mutex: with one thread per connection, several
+ * sessions write here at once. It also rotates at a size cap, so a long-running
+ * service cannot fill the disk with one unbounded file.
  */
 
 #ifndef ROSSH_LOG_H
@@ -23,6 +25,10 @@ typedef enum {
  * a file that cannot be opened is reported and ignored. */
 void log_open(const char *path);
 void log_close(void);
+
+/* Rotate the file once it reaches `bytes` (0 = never). Set this before
+ * log_open: an already oversized file is rotated on open. */
+void log_set_max_size(long bytes);
 
 /* Threshold by name — error, warn/warning, info, debug, case-insensitive.
  * Returns 0, or -1 for an unknown name (the level is left unchanged). */

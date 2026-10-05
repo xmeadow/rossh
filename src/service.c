@@ -64,6 +64,7 @@ static void WINAPI service_main(DWORD argc, char **argv)
      * path, so there is nothing to parse here. */
     config_defaults(&cfg);
     config_load(&cfg, g_config_path);
+    log_set_max_size(cfg.log_max_size);
     log_open(cfg.log_file);
     log_set_level(cfg.log_level);
     log_info("rossh service starting");

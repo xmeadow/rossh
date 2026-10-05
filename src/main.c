@@ -289,6 +289,29 @@ static void session_slot_release(void)
     sessions_unlock();
 }
 
+static int session_slots_active(void)
+{
+    int n;
+
+    sessions_lock();
+    n = g_sessions;
+    sessions_unlock();
+    return n;
+}
+
+/* Wait, bounded, for in-flight sessions to finish. Returns how many are still
+ * active (0 when the drain succeeded). */
+static int session_slots_wait(int seconds)
+{
+    int waited = 0;
+
+    while (session_slots_active() > 0 && waited < seconds * 1000) {
+        pause_ms(50);
+        waited += 50;
+    }
+    return session_slots_active();
+}
+
 typedef struct {
     WOLFSSH        *ssh;
     socket_t        fd;
@@ -567,6 +590,17 @@ int server_run(const config_t *cfg, int once)
         }
     }
 
+    /* Let in-flight sessions finish rather than kill their threads with the
+     * process. Bounded, so an idle shell cannot hold a stop up. */
+    if (session_slots_active() > 0) {
+        int left;
+
+        log_info("waiting up to 3 s for active sessions to finish");
+        left = session_slots_wait(3);
+        if (left > 0)
+            log_warn("%d session(s) still active, exiting anyway", left);
+    }
+
     trace("exiting");
     if (g_listen_fd != INVALID_SOCKET) {
         close_socket(g_listen_fd);
@@ -623,6 +657,7 @@ int main(int argc, char **argv)
     }
     config_load(&cfg, config_path);
 
+    log_set_max_size(cfg.log_max_size);
     log_open(cfg.log_file);
     if (log_set_level(cfg.log_level) != 0) {
         log_warn("unknown log_level '%s', keeping info", cfg.log_level);
