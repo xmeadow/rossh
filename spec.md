@@ -315,9 +315,9 @@ invocations need `%SystemRoot%\system32` prepended.
   OpenSSH treats a server disconnect as an error and returns 255, discarding the
   command's exit status — the opposite of what a clean end should do.
 - **The client trusts on first use, and speaks only our suite.** Its `known_hosts`
-  is a plain two-column file keyed by the host string typed on the command line
-  (no hashing, no `[host]:port` form). Keys are `rossh --genkey` PKCS#8 DER
-  ed25519: ReactOS has neither `ssh-keygen` nor a `~/.ssh` convention, so
+  is a plain two-column file keyed the way OpenSSH does it — the bare host on
+  port 22, `[host]:port` otherwise (no hashing). Keys are `rossh --genkey` PKCS#8
+  DER ed25519: ReactOS has neither `ssh-keygen` nor a `~/.ssh` convention, so
   `--genkey` and `-i <path>` are the workflow, and it cannot read an OpenSSH key
   file. It offers exactly §4.1, so it will not talk to an ancient server —
   acceptable, since the servers we care about are current.

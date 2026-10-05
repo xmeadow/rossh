@@ -160,6 +160,9 @@ ssh   [-p port] [-i key] [-l user] [--known-hosts file] [--insecure] [-v]
   there, so full-screen programs are out of scope. On Linux the shell runs on a
   real pty and behaves normally.
 - No RSA, no compression, no port forwarding.
+- **IPv4 only.** ReactOS' `ws2_32` does not export `inet_pton` (the very gap
+  that stops Win32-OpenSSH from loading), so address parsing stays on `inet_addr`
+  and there is no IPv6.
 - A session ends when the connection closes, not with a fully clean SSH
   disconnect.
 

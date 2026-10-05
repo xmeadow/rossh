@@ -263,15 +263,30 @@ static size_t slurp(const char *path, byte *buf, size_t cap)
  * Trust on first use, which is what a small deployment wants and what OpenSSH
  * did for years: the first key seen for a host is written down, and any later
  * one that differs is refused rather than quietly accepted.
+ *
+ * The name is OpenSSH's: the bare host on port 22, `[host]:port` otherwise. A
+ * plain `host` line is still honoured on lookup, so an existing file keeps
+ * working and a host reached on two ports is not a false "key changed".
  */
+static void host_key_name(const client_opts_t *o, char *out, size_t cap)
+{
+    if (o->port == 22)
+        snprintf(out, cap, "%s", o->host);
+    else
+        snprintf(out, cap, "[%s]:%d", o->host, o->port);
+}
+
 static int known_host_ok(const client_opts_t *o, const char *b64)
 {
     FILE *f;
     char  line[512];
+    char  name[256];
     int   known = 0;
 
     if (o->known_hosts == NULL)
         return 1;                          /* nothing to remember with */
+
+    host_key_name(o, name, sizeof name);
 
     f = fopen(o->known_hosts, "r");
     if (f != NULL) {
@@ -282,7 +297,7 @@ static int known_host_ok(const client_opts_t *o, const char *b64)
             if (sep == NULL)
                 continue;
             *sep = '\0';
-            if (strcmp(line, o->host) != 0)
+            if (strcmp(line, name) != 0 && strcmp(line, o->host) != 0)
                 continue;
 
             known = 1;
@@ -301,16 +316,16 @@ static int known_host_ok(const client_opts_t *o, const char *b64)
     if (known) {
         fprintf(stderr,
                 "ssh: the host key of %s does NOT match the one on record — "
-                "refusing to connect\n", o->host);
+                "refusing to connect\n", name);
         return 0;
     }
 
     f = fopen(o->known_hosts, "a");
     if (f != NULL) {
-        fprintf(f, "%s %s\n", o->host, b64);
+        fprintf(f, "%s %s\n", name, b64);
         fclose(f);
         fprintf(stderr, "ssh: added the host key of %s to %s\n",
-                o->host, o->known_hosts);
+                name, o->known_hosts);
     }
     return 1;
 }
