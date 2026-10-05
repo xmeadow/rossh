@@ -307,12 +307,13 @@ invocations need `%SystemRoot%\system32` prepended.
   rather than asserting the opposite. Real confinement needs either a small
   upstream patch or our own SFTP file layer — M4, together with per-user policy
   (where an SFTP-only user, without `exec`, would make a chroot meaningful).
-- **Session end is not a clean SSH disconnect.** `exec` output now respects the
-  peer's window, so nothing is truncated any more, but the session still ends
-  by closing the socket instead of sending `SSH_MSG_DISCONNECT`. A quiet client
-  (`ssh -q`) says nothing; others remark on it. Sending the disconnect where it
-  seemed obvious truncated the final packets and lost the exit status, so this
-  needs a gentler teardown (let the client close first) rather than a one-liner.
+- **Session end: the client closes, deliberately without a `SSH_MSG_DISCONNECT`.**
+  `exec` output respects the peer's window, so nothing is truncated. The session
+  then ends by letting the client's FIN arrive (a one-second bounded drain) before
+  the socket is closed, so a well-behaved client no longer reports "Connection
+  closed by remote host". An explicit `SSH_MSG_DISCONNECT` was tried and rejected:
+  OpenSSH treats a server disconnect as an error and returns 255, discarding the
+  command's exit status — the opposite of what a clean end should do.
 - **The client trusts on first use, and speaks only our suite.** Its `known_hosts`
   is a plain two-column file keyed by the host string typed on the command line
   (no hashing, no `[host]:port` form). Keys are `rossh --genkey` PKCS#8 DER

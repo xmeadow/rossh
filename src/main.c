@@ -354,6 +354,19 @@ static void serve_connection(WOLFSSH *ssh, socket_t cfd, const config_t *cfg)
     }
     log_debug("wolfSSH_shutdown -> %d", rc);
 
+    /* Let the client hang up first. The exit status is already on the wire, but
+     * closing the TCP immediately makes the client report "Connection closed by
+     * remote host". A one-second bounded drain until its FIN turns that into a
+     * clean end — and, unlike an SSH_MSG_DISCONNECT, it does not make OpenSSH
+     * discard the exit status and report 255. */
+    session_set_io_timeout((WS_SOCKET_T)cfd, 1);
+    for (;;) {
+        char drain[512];
+
+        if (recv(cfd, drain, (int)sizeof drain, 0) <= 0)
+            break;
+    }
+
     wolfSSH_free(ssh);
     close_socket(cfd);
     session_free(s);
