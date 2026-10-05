@@ -40,9 +40,26 @@
     #define RtlGenRandom SystemFunction036
 #else
     #include <unistd.h>
+    #include <pthread.h>
 #endif
 
 #include "rng.h"
+
+/* The pool is process-wide, and with one thread per connection several sessions
+ * can reach it at once — the seed callback runs when a connection's RNG is
+ * first used. Every public entry takes this lock; the mixing helpers below run
+ * only from under it. */
+#ifdef _WIN32
+static CRITICAL_SECTION g_rng_lock;
+#define rng_lock_init() InitializeCriticalSection(&g_rng_lock)
+#define rng_lock()      EnterCriticalSection(&g_rng_lock)
+#define rng_unlock()    LeaveCriticalSection(&g_rng_lock)
+#else
+static pthread_mutex_t g_rng_lock = PTHREAD_MUTEX_INITIALIZER;
+#define rng_lock_init() ((void)0)
+#define rng_lock()      pthread_mutex_lock(&g_rng_lock)
+#define rng_unlock()    pthread_mutex_unlock(&g_rng_lock)
+#endif
 
 #define POOL_SIZE 32
 
@@ -143,16 +160,20 @@ static void stir_cheap_sources(void)
     s.wall  = (long long)time(NULL);
     s.stack = &s;   /* address of a local: catches ASLR */
 
+    rng_lock();
     mix(&s, sizeof s);
+    rng_unlock();
 }
 
 void rng_add(const void *buf, size_t len, const char *tag)
 {
+    rng_lock();
     if (tag != NULL)
         mix(tag, strlen(tag));
     if (len > 0)
         mix(buf, len);
     pool_calls++;
+    rng_unlock();
 }
 
 void rng_bytes(void *out, size_t len)
@@ -160,6 +181,7 @@ void rng_bytes(void *out, size_t len)
     byte  *p = (byte *)out;
     byte   block[POOL_SIZE];
 
+    rng_lock();
     while (len > 0) {
         wc_Sha256 sha;
         byte      digest[POOL_SIZE];
@@ -182,6 +204,7 @@ void rng_bytes(void *out, size_t len)
         p   += take;
         len -= take;
     }
+    rng_unlock();
     memset(block, 0, sizeof block);
 }
 
@@ -208,6 +231,8 @@ void rng_start(void)
     byte   entropy[64];
     size_t got;
     int    rc;
+
+    rng_lock_init();
 
     /* wolfSSL's global state has to be initialised once, before any other
      * wolfSSL call. In particular this creates the mutex that guards its DRBG

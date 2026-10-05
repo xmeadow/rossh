@@ -4,6 +4,8 @@
 #include <wolfssl/options.h>
 #include <wolfssh/ssh.h>
 
+#include "config.h"
+
 /*
  * The session layer: who may log in, and what happens when they run something.
  *
@@ -38,24 +40,34 @@ int keylist_load(keylist_t *list, const char *path);
 /* Does `blob` match one of the loaded keys? */
 int keylist_contains(const keylist_t *list, const byte *blob, word32 sz);
 
-/* Installs the authentication and channel callbacks on the context. */
+/* Installs the authentication and channel callbacks on the context. Shared by
+ * every connection — the per-connection state lives in a session_t. */
 int session_configure(WOLFSSH_CTX *ctx);
 
-/* Binds one connection: the callbacks find the key list and the WOLFSSH* here.
- * Single-connection at a time, like the rest of M2 (spec.md §7). */
-int session_bind(WOLFSSH *ssh, const keylist_t *keys);
+/* One connection's state: its WOLFSSH, the authorised keys (re-read per
+ * connection) and the shell bookkeeping. Opaque to callers, which only create,
+ * start and free it — so several connections can be in flight at once. */
+typedef struct session session_t;
+
+session_t *session_new(void);
+void       session_free(session_t *s);
+
+/* Attach a freshly accepted connection: remember its WOLFSSH, load the
+ * authorised keys from cfg and point the callbacks at this session. */
+int session_start(session_t *s, WOLFSSH *ssh, const config_t *cfg);
 
 /* Serves the SFTP subsystem (M3) until the connection ends. `root`, when not
  * NULL, is the jail every path is resolved against. */
 int session_sftp(WOLFSSH *ssh, const char *root);
 
-/* True once a `shell` request has arrived on the current connection. The request
- * callback only records it; main runs the loop once wolfSSH_accept() returns. */
-int session_shell_requested(void);
+/* True once a `shell` request has arrived on this connection. The request
+ * callback only records it; the caller runs the loop once wolfSSH_accept()
+ * returns. */
+int session_shell_requested(session_t *s);
 
-/* Runs the interactive shell for the current connection until it ends. `fd` is
- * the connection socket: the loop polls it for keystrokes while draining the
- * shell process's output. */
-int session_shell(WOLFSSH *ssh, WS_SOCKET_T fd);
+/* Runs the interactive shell for this connection until it ends. `fd` is the
+ * connection socket: the loop polls it for keystrokes while draining the shell
+ * process's output. */
+int session_shell(session_t *s, WS_SOCKET_T fd);
 
 #endif /* ROSSH_SESSION_H */

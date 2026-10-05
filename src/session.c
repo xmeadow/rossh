@@ -34,18 +34,15 @@
     #include <time.h>
 #endif
 
-typedef struct {
+struct session {
     WOLFSSH          *ssh;
-    const keylist_t  *keys;
     WOLFSSH_CHANNEL  *shell;     /* set once a `shell` request arrives */
+    keylist_t         keys;      /* authorised keys, re-read per connection */
     int               term_w;    /* terminal size, from pty-req / window-change */
     int               term_h;
     int               term_set;
     int               pty_fd;    /* the live pty master, for resize; -1 otherwise */
-} session_t;
-
-/* One connection at a time (spec.md §7), so one of these is enough. */
-static session_t g_session;
+};
 
 /* ------------------------------------------------------------------ keys --- */
 
@@ -152,7 +149,7 @@ static int auth_cb(byte auth_type, WS_UserAuthData *auth, void *ctx)
     case WOLFSSH_USERAUTH_PUBLICKEY:
         printf("auth: publickey offered by '%.*s'\n",
                (int)auth->usernameSz, (const char *)auth->username);
-        if (keylist_contains(s->keys, auth->sf.publicKey.publicKey,
+        if (keylist_contains(&s->keys, auth->sf.publicKey.publicKey,
                              auth->sf.publicKey.publicKeySz)) {
             printf("auth: key accepted\n");
             return WOLFSSH_USERAUTH_SUCCESS;
@@ -182,11 +179,11 @@ static int auth_cb(byte auth_type, WS_UserAuthData *auth, void *ctx)
  * error is how output used to get silently truncated — `whoami` arrived, the
  * second command in the same line did not.
  */
-static void send_to_channel(const char *data, size_t len, void *ctx)
+static void send_to_channel(session_t *s, const char *data, size_t len,
+                            WOLFSSH_CHANNEL *channel)
 {
-    WOLFSSH_CHANNEL *channel = (WOLFSSH_CHANNEL *)ctx;
-    size_t           sent    = 0;
-    int              stalls  = 0;
+    size_t sent   = 0;
+    int    stalls = 0;
 
     while (sent < len) {
         word32 n  = (word32)(len - sent);
@@ -206,8 +203,8 @@ static void send_to_channel(const char *data, size_t len, void *ctx)
                 printf("exec: the channel window stayed full, output truncated\n");
                 return;
             }
-            if (wolfSSH_worker(g_session.ssh, NULL) < 0 &&
-                wolfSSH_get_error(g_session.ssh) == WS_EOF)
+            if (wolfSSH_worker(s->ssh, NULL) < 0 &&
+                wolfSSH_get_error(s->ssh) == WS_EOF)
                 return;                    /* peer gone */
             continue;
         }
@@ -226,7 +223,8 @@ static void send_to_channel(const char *data, size_t len, void *ctx)
  * full path, because PATH is broken there, and stdin is deliberately not
  * connected — wSSH's stdin semantics are unusable anyway.
  */
-static int run_and_stream(const char *command, void (*sink)(const char *, size_t, void *), void *ctx)
+static int run_and_stream(const char *command, session_t *s,
+                          WOLFSSH_CHANNEL *channel)
 {
     SECURITY_ATTRIBUTES sa;
     STARTUPINFOA        si;
@@ -273,7 +271,7 @@ static int run_and_stream(const char *command, void (*sink)(const char *, size_t
         DWORD got = 0;
         if (!ReadFile(rd, buf, (DWORD)sizeof buf, &got, NULL) || got == 0)
             break;
-        sink(buf, (size_t)got, ctx);
+        send_to_channel(s, buf, (size_t)got, channel);
     }
 
     WaitForSingleObject(pi.hProcess, INFINITE);
@@ -290,7 +288,8 @@ static int run_and_stream(const char *command, void (*sink)(const char *, size_t
     return status;
 }
 #else
-static int run_and_stream(const char *command, void (*sink)(const char *, size_t, void *), void *ctx)
+static int run_and_stream(const char *command, session_t *s,
+                          WOLFSSH_CHANNEL *channel)
 {
     FILE  *p;
     char   line[8192];
@@ -308,7 +307,7 @@ static int run_and_stream(const char *command, void (*sink)(const char *, size_t
     for (;;) {
         size_t n = fread(buf, 1, sizeof buf, p);
         if (n > 0)
-            sink(buf, n, ctx);
+            send_to_channel(s, buf, n, channel);
         if (n < sizeof buf)
             break;
     }
@@ -339,7 +338,7 @@ static int channel_exec_cb(WOLFSSH_CHANNEL *channel, void *ctx)
     }
 
     printf("exec: %s\n", command);
-    status = run_and_stream(command, send_to_channel, channel);
+    status = run_and_stream(command, s, channel);
 
     if (status < 0) {
         printf("exec: could not run the command\n");
@@ -481,7 +480,8 @@ static int shell_write_all(int fd, const byte *buf, size_t len)
     return 0;
 }
 
-static int shell_posix(WOLFSSH *ssh, WOLFSSH_CHANNEL *channel, WS_SOCKET_T fd)
+static int shell_posix(session_t *s, WOLFSSH *ssh, WOLFSSH_CHANNEL *channel,
+                       WS_SOCKET_T fd)
 {
     struct winsize ws;
     int            master = -1;
@@ -489,10 +489,10 @@ static int shell_posix(WOLFSSH *ssh, WOLFSSH_CHANNEL *channel, WS_SOCKET_T fd)
     byte           buf[4096];
     int            done = 0;
 
-    ws.ws_col    = (unsigned short)((g_session.term_set && g_session.term_w > 0)
-                                    ? g_session.term_w : 80);
-    ws.ws_row    = (unsigned short)((g_session.term_set && g_session.term_h > 0)
-                                    ? g_session.term_h : 24);
+    ws.ws_col    = (unsigned short)((s->term_set && s->term_w > 0)
+                                    ? s->term_w : 80);
+    ws.ws_row    = (unsigned short)((s->term_set && s->term_h > 0)
+                                    ? s->term_h : 24);
     ws.ws_xpixel = 0;
     ws.ws_ypixel = 0;
 
@@ -510,7 +510,7 @@ static int shell_posix(WOLFSSH *ssh, WOLFSSH_CHANNEL *channel, WS_SOCKET_T fd)
         _exit(127);
     }
 
-    g_session.pty_fd = master;
+    s->pty_fd = master;
     shell_set_nonblocking(master);
     shell_set_nonblocking((int)fd);
     printf("shell: pty open, pid %d (%ux%u)\n",
@@ -523,7 +523,7 @@ static int shell_posix(WOLFSSH *ssh, WOLFSSH_CHANNEL *channel, WS_SOCKET_T fd)
         for (;;) {                              /* the shell -> the client */
             ssize_t n = read(master, buf, sizeof buf);
             if (n > 0) {
-                send_to_channel((const char *)buf, (size_t)n, channel);
+                send_to_channel(s, (const char *)buf, (size_t)n, channel);
                 progressed = 1;
             }
             else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -555,7 +555,7 @@ static int shell_posix(WOLFSSH *ssh, WOLFSSH_CHANNEL *channel, WS_SOCKET_T fd)
             shell_sleep_ms(20);
     }
 
-    g_session.pty_fd = -1;
+    s->pty_fd = -1;
     if (master >= 0)
         close(master);
     kill(pid, SIGHUP);
@@ -636,7 +636,8 @@ static int pipe_ring_closed(pipe_ring_t *r)
     return c;
 }
 
-static int shell_windows(WOLFSSH *ssh, WOLFSSH_CHANNEL *channel, WS_SOCKET_T fd)
+static int shell_windows(session_t *s, WOLFSSH *ssh, WOLFSSH_CHANNEL *channel,
+                         WS_SOCKET_T fd)
 {
     SECURITY_ATTRIBUTES sa;
     STARTUPINFOA        si;
@@ -703,7 +704,7 @@ static int shell_windows(WOLFSSH *ssh, WOLFSSH_CHANNEL *channel, WS_SOCKET_T fd)
         size_t n;
 
         while ((n = pipe_ring_drain(&ring, buf, sizeof buf)) > 0) {   /* shell -> client */
-            send_to_channel((const char *)buf, n, channel);
+            send_to_channel(s, (const char *)buf, n, channel);
             progressed = 1;
         }
         if (pipe_ring_closed(&ring)) {
@@ -736,7 +737,7 @@ static int shell_windows(WOLFSSH *ssh, WOLFSSH_CHANNEL *channel, WS_SOCKET_T fd)
                 byte c = buf[i];
 
                 if (c == '\r' || c == '\n') {          /* end of line */
-                    send_to_channel("\r\n", 2, channel);
+                    send_to_channel(s, "\r\n", 2, channel);
                     if (in_w != NULL && lineLen > 0)
                         WriteFile(in_w, line, (DWORD)lineLen, &written, NULL);
                     if (in_w != NULL)
@@ -746,11 +747,11 @@ static int shell_windows(WOLFSSH *ssh, WOLFSSH_CHANNEL *channel, WS_SOCKET_T fd)
                 else if (c == 0x7f || c == 0x08) {      /* backspace */
                     if (lineLen > 0) {
                         lineLen--;
-                        send_to_channel("\b \b", 3, channel);
+                        send_to_channel(s, "\b \b", 3, channel);
                     }
                 }
                 else if (c == 0x03) {                   /* Ctrl-C */
-                    send_to_channel("^C\r\n", 4, channel);
+                    send_to_channel(s, "^C\r\n", 4, channel);
                     lineLen = 0;
                 }
                 else if (c == 0x04) {                   /* Ctrl-D */
@@ -762,7 +763,7 @@ static int shell_windows(WOLFSSH *ssh, WOLFSSH_CHANNEL *channel, WS_SOCKET_T fd)
                 else if (c >= 0x20) {                   /* printable: echo it */
                     if (lineLen < sizeof line)
                         line[lineLen++] = (char)c;
-                    send_to_channel((const char *)&c, 1, channel);
+                    send_to_channel(s, (const char *)&c, 1, channel);
                 }
                 /* escape sequences and other control bytes are dropped */
             }
@@ -825,19 +826,19 @@ static int term_resize_cb(WOLFSSH *ssh, word32 w, word32 h,
     return WS_SUCCESS;
 }
 
-int session_shell_requested(void)
+int session_shell_requested(session_t *s)
 {
-    return g_session.shell != NULL;
+    return s != NULL && s->shell != NULL;
 }
 
-int session_shell(WOLFSSH *ssh, WS_SOCKET_T fd)
+int session_shell(session_t *s, WS_SOCKET_T fd)
 {
-    if (g_session.shell == NULL)
+    if (s == NULL || s->shell == NULL)
         return -1;
 #ifdef _WIN32
-    return shell_windows(ssh, g_session.shell, fd);
+    return shell_windows(s, s->ssh, s->shell, fd);
 #else
-    return shell_posix(ssh, g_session.shell, fd);
+    return shell_posix(s, s->ssh, s->shell, fd);
 #endif
 }
 
@@ -855,18 +856,38 @@ int session_configure(WOLFSSH_CTX *ctx)
     return 0;
 }
 
-int session_bind(WOLFSSH *ssh, const keylist_t *keys)
+session_t *session_new(void)
 {
-    g_session.ssh      = ssh;
-    g_session.keys     = keys;
-    g_session.shell    = NULL;
-    g_session.term_w   = 80;
-    g_session.term_h   = 24;
-    g_session.term_set = 0;
-    g_session.pty_fd   = -1;
-    wolfSSH_SetUserAuthCtx(ssh, &g_session);
-    wolfSSH_SetChannelReqCtx(ssh, &g_session);
+    return (session_t *)calloc(1, sizeof(session_t));
+}
+
+void session_free(session_t *s)
+{
+    free(s);
+}
+
+int session_start(session_t *s, WOLFSSH *ssh, const config_t *cfg)
+{
+    if (s == NULL)
+        return -1;
+
+    s->ssh      = ssh;
+    s->shell    = NULL;
+    s->term_w   = 80;
+    s->term_h   = 24;
+    s->term_set = 0;
+    s->pty_fd   = -1;
+
+    /* Re-read per connection, so a key added or revoked takes effect on the
+     * next login with no restart. */
+    memset(&s->keys, 0, sizeof s->keys);
+    if (cfg->authorized_keys[0] != '\0' &&
+        keylist_load(&s->keys, cfg->authorized_keys) != 0)
+        return -1;
+
+    wolfSSH_SetUserAuthCtx(ssh, s);
+    wolfSSH_SetChannelReqCtx(ssh, s);
     wolfSSH_SetTerminalResizeCb(ssh, term_resize_cb);
-    wolfSSH_SetTerminalResizeCtx(ssh, &g_session);
+    wolfSSH_SetTerminalResizeCtx(ssh, s);
     return 0;
 }

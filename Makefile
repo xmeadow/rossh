@@ -46,7 +46,8 @@ endif
 DEP_CPPFLAGS += $(EXTRA_CPPFLAGS)
 
 # util: forkpty, the pty the native shell session runs on (src/session.c).
-LDLIBS_native = -lwolfssh -lwolfssl -lm -lutil
+# pthread: one thread per connection (src/main.c).
+LDLIBS_native = -lwolfssh -lwolfssl -lm -lutil -lpthread
 # advapi32: RtlGenRandom in src/rng.c. No crypt32: wolfSSL is built
 # --enable-cryptonly, so its X.509 store code never enters the image.
 LDLIBS_win32  = -lwolfssh -lwolfssl -lws2_32 -ladvapi32

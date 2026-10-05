@@ -2,11 +2,11 @@
  * rossh — an SSH server and client for ReactOS.
  *
  * Server mode binds a listener, offers the modern suite of spec.md §4.1, and
- * serves one session at a time: publickey auth, `exec`, an interactive `shell`
- * (M5) and the SFTP subsystem. Client mode — entered when the program is invoked
- * as `ssh`, or with --client — connects out and runs one command, or an
- * interactive session when no command is given. Both live in this one binary;
- * see src/client.c.
+ * serves every connection on its own thread: publickey auth, `exec`, an
+ * interactive `shell` (M5) and the SFTP subsystem. Client mode — entered when
+ * the program is invoked as `ssh`, or with --client — connects out and runs one
+ * command, or an interactive session when no command is given. Both live in this
+ * one binary; see src/client.c.
  */
 
 #include <wolfssl/options.h>
@@ -43,6 +43,7 @@
     #include <arpa/inet.h>
     #include <errno.h>
     #include <netinet/in.h>
+    #include <pthread.h>
     #include <sys/socket.h>
     #include <unistd.h>
     typedef int socket_t;
@@ -62,10 +63,6 @@ static const char algo_hostkey[] = "ssh-ed25519";
 static const char algo_cipher[]  = "aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr";
 static const char algo_mac[]     = "hmac-sha2-256";
 static const char algo_keys[]    = "ssh-ed25519";
-
-/* The authorised keys. File scope so 32 KB of key material does not sit on the
- * stack. */
-static keylist_t g_keys;
 
 static int load_host_key(WOLFSSH_CTX *ctx, const char *path)
 {
@@ -238,6 +235,133 @@ void server_request_stop(void)
         close_socket(fd);              /* unblocks accept() */
 }
 
+/* --------------------------------------------------------------- sessions ---
+ *
+ * One connection, one thread.
+ *
+ * rossh used to serve a single session at a time: the accept loop entered the
+ * session and only returned when it ended, so a second client got its TCP
+ * connection accepted and then nothing at all — no banner, no error. That reads
+ * as a hang, which is exactly what it is. Every session now owns a session_t
+ * and runs on its own thread, so logins in parallel behave the way an sshd is
+ * expected to behave.
+ *
+ * The WOLFSSH_CTX (host key, algorithm lists) and the configuration are shared
+ * and read-only, so they need no locking. The entropy pool is the one shared
+ * piece of mutable state, and it guards itself (src/rng.c).
+ */
+
+typedef struct {
+    WOLFSSH        *ssh;
+    socket_t        fd;
+    const config_t *cfg;
+} connection_t;
+
+static void serve_connection(WOLFSSH *ssh, socket_t cfd, const config_t *cfg)
+{
+    session_t *s = session_new();
+    int        rc;
+
+    if (s == NULL) {
+        log_error("out of memory for a session");
+        wolfSSH_free(ssh);
+        close_socket(cfd);
+        return;
+    }
+
+    /* The keys are re-read here, per connection: a key added after the service
+     * started (or removed to revoke it) takes effect on the next connection,
+     * with no restart. */
+    if (session_start(s, ssh, cfg) != 0)
+        log_warn("cannot read authorised keys '%s'", cfg->authorized_keys);
+
+    wolfSSH_set_fd(ssh, (WS_SOCKET_T)cfd);
+    rc = wolfSSH_accept(ssh);
+    log_debug("wolfSSH_accept -> %d", rc);
+
+    /* A client that asked for the sftp subsystem is handed to the SFTP server
+     * here — wolfSSH_accept() reports that with WS_SFTP_COMPLETE, having already
+     * run the version exchange. exec requests were answered by their channel
+     * callback. A `shell` request only recorded the channel; the interactive
+     * loop runs here, on the socket. */
+    if (rc == WS_SFTP_COMPLETE)
+        session_sftp(ssh, cfg->sftp_root[0] != '\0' ? cfg->sftp_root : NULL);
+    else if (session_shell_requested(s))
+        session_shell(s, (WS_SOCKET_T)cfd);
+
+    /* Close the session properly. Without this the socket is dropped as soon as
+     * the session ends, and the client sees a connection reset instead of its
+     * exit status. */
+    for (;;) {
+        rc = wolfSSH_shutdown(ssh);
+        if (rc != WS_WANT_READ && rc != WS_WANT_WRITE)
+            break;
+    }
+    log_debug("wolfSSH_shutdown -> %d", rc);
+
+    wolfSSH_free(ssh);
+    close_socket(cfd);
+    session_free(s);
+}
+
+static void connection_worker(void *arg)
+{
+    connection_t *c = (connection_t *)arg;
+
+    serve_connection(c->ssh, c->fd, c->cfg);
+    free(c);
+}
+
+#ifdef _WIN32
+static DWORD WINAPI connection_thread(LPVOID arg)
+{
+    connection_worker(arg);
+    return 0;
+}
+#else
+static void *connection_thread(void *arg)
+{
+    connection_worker(arg);
+    return NULL;
+}
+#endif
+
+/* Run one accepted connection on its own detached thread. The accept loop never
+ * joins: the threads end with their sessions, and the process outlives them. */
+static int spawn_connection(WOLFSSH *ssh, socket_t cfd, const config_t *cfg)
+{
+    connection_t *c = (connection_t *)malloc(sizeof *c);
+
+    if (c == NULL)
+        return -1;
+    c->ssh = ssh;
+    c->fd  = cfd;
+    c->cfg = cfg;
+
+#ifdef _WIN32
+    {
+        HANDLE h = CreateThread(NULL, 0, connection_thread, c, 0, NULL);
+
+        if (h == NULL) {
+            free(c);
+            return -1;
+        }
+        CloseHandle(h);
+    }
+#else
+    {
+        pthread_t t;
+
+        if (pthread_create(&t, NULL, connection_thread, c) != 0) {
+            free(c);
+            return -1;
+        }
+        pthread_detach(t);
+    }
+#endif
+    return 0;
+}
+
 int server_run(const config_t *cfg, int once)
 {
     WOLFSSH_CTX *ctx;
@@ -272,13 +396,18 @@ int server_run(const config_t *cfg, int once)
     trace("host key loaded");
 
     if (cfg->authorized_keys[0] != '\0') {
-        if (keylist_load(&g_keys, cfg->authorized_keys) != 0) {
+        keylist_t probe;
+
+        /* Fail fast if the file cannot be read at all. The keys themselves are
+         * re-read per connection (session_start), so a later change still takes
+         * effect without a restart. */
+        if (keylist_load(&probe, cfg->authorized_keys) != 0) {
             log_error("cannot read authorised keys '%s'", cfg->authorized_keys);
             wolfSSH_CTX_free(ctx);
             return 1;
         }
         log_info("authorised keys: %d loaded from %s",
-                 g_keys.count, cfg->authorized_keys);
+                 probe.count, cfg->authorized_keys);
     }
     else {
         log_warn("no authorized_keys configured, every login is refused");
@@ -339,46 +468,22 @@ int server_run(const config_t *cfg, int once)
                 break;
             continue;
         }
-        /* Re-read the authorised keys for every connection: a key added after
-         * the service started (or removed to revoke it) takes effect on the
-         * next connection, with no restart. The file is tiny, and this is how
-         * dogfooding wants it to behave. */
-        if (cfg->authorized_keys[0] != '\0' &&
-            keylist_load(&g_keys, cfg->authorized_keys) != 0)
-            log_warn("cannot read authorised keys '%s'", cfg->authorized_keys);
-        session_bind(ssh, &g_keys);
 
-        wolfSSH_set_fd(ssh, (WS_SOCKET_T)cfd);
-        rc = wolfSSH_accept(ssh);
-        log_debug("wolfSSH_accept -> %d", rc);
-
-        /* A client that asked for the sftp subsystem is handed to the SFTP
-         * server here — wolfSSH_accept() reports that with WS_SFTP_COMPLETE,
-         * having already run the version exchange. exec requests were answered
-         * by their channel callback. A `shell` request only recorded the
-         * channel; the interactive loop runs here, on the socket. */
-        if (rc == WS_SFTP_COMPLETE) {
-            session_sftp(ssh, cfg->sftp_root[0] != '\0' ? cfg->sftp_root : NULL);
-        }
-        else if (session_shell_requested()) {
-            session_shell(ssh, (WS_SOCKET_T)cfd);
-        }
-
-        /* Close the session properly. Without this the socket is dropped as
-         * soon as accept() returns, and the client sees a connection reset
-         * instead of its exit status. */
-        for (;;) {
-            rc = wolfSSH_shutdown(ssh);
-            if (rc != WS_WANT_READ && rc != WS_WANT_WRITE)
-                break;
-        }
-        log_debug("wolfSSH_shutdown -> %d", rc);
-
-        wolfSSH_free(ssh);
-        close_socket(cfd);
-
-        if (once)
+        if (once) {
+            /* --once, what the checks use: serve this one connection inline so
+             * the process ends when the session does. */
+            serve_connection(ssh, cfd, cfg);
             break;
+        }
+
+        /* Otherwise hand it to its own thread, so the accept loop is ready for
+         * the next client immediately. If the thread cannot be started, serve
+         * it here rather than drop the connection (it just blocks the loop
+         * until it is done). */
+        if (spawn_connection(ssh, cfd, cfg) != 0) {
+            log_warn("cannot start a thread for the connection, serving it here");
+            serve_connection(ssh, cfd, cfg);
+        }
     }
 
     trace("exiting");
