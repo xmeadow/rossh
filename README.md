@@ -64,6 +64,12 @@ rossh --stop        # stop the service (waits until it has really stopped)
 rossh setup <dir>   # point the service at the new binary and start it
 ```
 
+Updating an install from **0.5.x or earlier** needs one extra thing: close any
+SSH sessions first, and run the installer from the desktop. Those builds serve a
+single session at a time, and while one is open the service cannot stop, so the
+installer would be unable to replace the binary. From 0.6.0 on every session has
+its own thread and the service stops cleanly, so this stops mattering.
+
 ## Using it
 
 The three commands above are the whole server-side story. `exec` passes back the

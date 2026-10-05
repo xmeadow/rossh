@@ -28,6 +28,7 @@ jobs:
           tools/m2-check.sh
           tools/m3-check.sh
           tools/client-check.sh
+          tools/concurrency-check.sh
           mv rossh rossh-native
 
       - name: Build rossh.exe and the installer
