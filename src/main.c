@@ -42,9 +42,12 @@
 #else
     #include <arpa/inet.h>
     #include <errno.h>
+    #include <fcntl.h>
     #include <netinet/in.h>
     #include <pthread.h>
+    #include <sys/select.h>
     #include <sys/socket.h>
+    #include <sys/time.h>
     #include <unistd.h>
     typedef int socket_t;
     #define socklen_type socklen_t
@@ -130,6 +133,56 @@ static int last_socket_error(void)
 #else
     return errno;
 #endif
+}
+
+/*
+ * A portable dead-line for the login grace. SO_RCVTIMEO is not reliable here —
+ * ReactOS' winsock accepts the call and then ignores it, so a silent client is
+ * never dropped. select() with a timeout works on both targets, so the handshake
+ * is driven on a non-blocking socket with our own deadline instead.
+ */
+static long long now_ms(void)
+{
+#ifdef _WIN32
+    return (long long)GetTickCount();
+#else
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
+}
+
+static void set_nonblocking(socket_t fd, int on)
+{
+#ifdef _WIN32
+    u_long mode = on ? 1u : 0u;
+
+    ioctlsocket(fd, FIONBIO, &mode);
+#else
+    int fl = fcntl(fd, F_GETFL, 0);
+
+    if (fl >= 0)
+        fcntl(fd, F_SETFL, on ? (fl | O_NONBLOCK) : (fl & ~O_NONBLOCK));
+#endif
+}
+
+/* Wait until `fd` is readable (or writable) or `timeout_ms` passes. Returns 1
+ * when ready, 0 on timeout, -1 on error. */
+static int wait_socket(socket_t fd, int for_read, int timeout_ms)
+{
+    fd_set         fds;
+    struct timeval tv;
+    int            rc;
+
+    FD_ZERO(&fds);
+    FD_SET(fd, &fds);
+    tv.tv_sec  = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+    rc = select((int)fd + 1, for_read ? &fds : NULL, for_read ? NULL : &fds,
+                NULL, &tv);
+    return (rc > 0) ? 1 : (rc == 0 ? 0 : -1);
 }
 
 static socket_t listen_on(const char *addr, int port)
@@ -322,6 +375,7 @@ static void serve_connection(WOLFSSH *ssh, socket_t cfd, const config_t *cfg)
 {
     session_t *s = session_new();
     int        rc;
+    int        login_timed_out = 0;
 
     if (s == NULL) {
         log_error("out of memory for a session");
@@ -338,11 +392,37 @@ static void serve_connection(WOLFSSH *ssh, socket_t cfd, const config_t *cfg)
 
     wolfSSH_set_fd(ssh, (WS_SOCKET_T)cfd);
 
-    /* Login grace: a client that connects and then does nothing must not hold
-     * this thread forever. The timeout surfaces as WS_WANT_READ, and the auth
-     * callback lifts it again once a key is accepted. */
-    session_set_io_timeout((WS_SOCKET_T)cfd, cfg->login_timeout);
-    rc = wolfSSH_accept(ssh);
+    /* Login grace: a client that connects and then goes silent must not hold
+     * this thread forever. The handshake runs on a non-blocking socket with our
+     * own deadline; a genuine error ends it early. */
+    if (cfg->login_timeout > 0) {
+        long long deadline = now_ms() + (long long)cfg->login_timeout * 1000;
+
+        set_nonblocking(cfd, 1);
+        for (;;) {
+            int err;
+            long long left;
+
+            rc = wolfSSH_accept(ssh);
+            if (rc == WS_SUCCESS || rc == WS_SFTP_COMPLETE)
+                break;
+
+            err = wolfSSH_get_error(ssh);
+            if (err != WS_WANT_READ && err != WS_WANT_WRITE)
+                break;
+
+            left = deadline - now_ms();
+            if (left <= 0 ||
+                wait_socket(cfd, err == WS_WANT_READ, (int)left) <= 0) {
+                login_timed_out = 1;
+                break;
+            }
+        }
+        set_nonblocking(cfd, 0);
+    }
+    else {
+        rc = wolfSSH_accept(ssh);
+    }
     log_debug("wolfSSH_accept -> %d", rc);
 
     /* A client that asked for the sftp subsystem is handed to the SFTP server
@@ -350,18 +430,16 @@ static void serve_connection(WOLFSSH *ssh, socket_t cfd, const config_t *cfg)
      * run the version exchange. exec requests were answered by their channel
      * callback. A `shell` request only recorded the channel; the interactive
      * loop runs here, on the socket. */
-    if (rc == WS_SFTP_COMPLETE) {
+    if (login_timed_out) {
+        log_warn("login timed out after %d s", cfg->login_timeout);
+    }
+    else if (rc == WS_SFTP_COMPLETE) {
         session_sftp(ssh, cfg->sftp_root[0] != '\0' ? cfg->sftp_root : NULL,
                      cfg->idle_timeout);
     }
     else if (rc == WS_SUCCESS) {
         if (session_shell_requested(s))
             session_shell(s, (WS_SOCKET_T)cfd);
-    }
-    else if (wolfSSH_get_error(ssh) == WS_WANT_READ) {
-        /* The login grace fired: accept() reports the socket timeout as
-         * WS_FATAL_ERROR with the would-block error left in the session. */
-        log_warn("login timed out after %d s", cfg->login_timeout);
     }
     else {
         log_debug("wolfSSH_accept failed (%d)", rc);

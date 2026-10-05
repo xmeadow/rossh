@@ -249,6 +249,7 @@ of wSSH and ReactOS, not of rossh.
 | `ping` is not a liveness test — ICMP is dropped even when the box is perfectly fine (100 % loss measured while port 22 answered immediately) | test the port. |
 | `tasklist` and `taskkill` exist only at `C:\ReactOS\system32\` | as with everything else, the full path. |
 | There is no `net.exe` and no `netsh` | `net start`/`net stop` and the firewall step do nothing here. Service control goes through rossh's own `--install` / `--stop` / `--uninstall`; `setup`'s firewall call is a harmless no-op. |
+| `SO_RCVTIMEO` is accepted but **ignored** | a socket read timeout never fires, so a silent client was never dropped and the login grace silently did nothing. `select()` with our own deadline works, so the handshake is driven on a non-blocking socket instead (see `src/main.c`). The SFTP idle timeout still rides on `SO_RCVTIMEO` and is therefore a no-op here; the shell counts its own ticks. |
 
 ## 11. The interactive shell (M5)
 
