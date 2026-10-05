@@ -187,7 +187,7 @@ docs/
   index.html           the download page, served from this directory
 src/                   the program: main, session, client, service, setup, …
 installer/rossh.nsi    the NSIS script behind rossh-setup.exe
-tools/                 build-deps.sh and the check scripts (m1/m2/m3/client)
+tools/                 build-deps.sh and the check scripts (m1/m2/m3/client/concurrency)
 third_party/           wolfSSL + wolfSSH, pinned submodules
 .github/workflows/     build on every push, release on a v* tag
 ```

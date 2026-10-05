@@ -6,9 +6,9 @@ on:
   pull_request:
 
 jobs:
-  # The native build is also the test build: the four acceptance checks of
-  # spec.md §10 run a real server on a spare port and talk to it with the
-  # runner's stock OpenSSH client.
+  # The native build is also the test build: the acceptance checks of spec.md §10
+  # run a real server on a spare port and talk to it with the runner's stock
+  # OpenSSH client.
   linux:
     runs-on: ubuntu-latest
     steps:
@@ -47,6 +47,9 @@ jobs:
 
       - name: Client — rossh's own ssh against rossh, and trust on first use
         run: tools/client-check.sh
+
+      - name: Concurrency — sessions overlap, they do not queue
+        run: tools/concurrency-check.sh
 
   # The build that ships. No checks here: the binary is for ReactOS and
   # Windows, which the runner cannot execute.
