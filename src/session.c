@@ -25,6 +25,8 @@
     #include <sys/wait.h>
     #include <sys/select.h>
     #include <sys/ioctl.h>
+    #include <sys/socket.h>
+    #include <sys/time.h>
     #include <termios.h>
     #include <pty.h>
     #include <unistd.h>
@@ -42,7 +44,35 @@ struct session {
     int               term_h;
     int               term_set;
     int               pty_fd;    /* the live pty master, for resize; -1 otherwise */
+    WS_SOCKET_T       fd;        /* the connection socket, for timeouts */
+    int               idle_timeout; /* seconds of silence before the session ends; 0 = off */
 };
+
+/*
+ * Apply (or clear, when `seconds` <= 0) a receive/send timeout to the socket.
+ *
+ * This is the whole timeout mechanism: wolfSSH maps a socket timeout to
+ * WS_WANT_READ (io.c maps EAGAIN and, on Windows, WSAETIMEDOUT the same way),
+ * so on an otherwise blocking socket a WANT_READ can only mean "nothing arrived
+ * within the timeout". Login grace uses it before authentication; the idle
+ * timeout uses it for SFTP, and the shell loops count their own ticks.
+ */
+void session_set_io_timeout(WS_SOCKET_T fd, int seconds)
+{
+#ifdef _WIN32
+    DWORD ms = (seconds > 0) ? (DWORD)seconds * 1000u : 0u;
+
+    setsockopt((SOCKET)fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms, sizeof ms);
+    setsockopt((SOCKET)fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&ms, sizeof ms);
+#else
+    struct timeval tv;
+
+    tv.tv_sec  = (seconds > 0) ? seconds : 0;
+    tv.tv_usec = 0;
+    setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+#endif
+}
 
 /* ------------------------------------------------------------------ keys --- */
 
@@ -152,6 +182,9 @@ static int auth_cb(byte auth_type, WS_UserAuthData *auth, void *ctx)
         if (keylist_contains(&s->keys, auth->sf.publicKey.publicKey,
                              auth->sf.publicKey.publicKeySz)) {
             printf("auth: key accepted\n");
+            /* Authentication is over: drop the login grace and fall back to the
+             * idle timeout, so a long-running `exec` is not cut off by it. */
+            session_set_io_timeout(s->fd, s->idle_timeout);
             return WOLFSSH_USERAUTH_SUCCESS;
         }
         printf("auth: key not in the authorised list\n");
@@ -383,7 +416,7 @@ static int channel_subsys_cb(WOLFSSH_CHANNEL *channel, void *ctx)
  * working directory, which is rarely what a server wants — M4 makes this
  * per-user, from the config.
  */
-int session_sftp(WOLFSSH *ssh, const char *root)
+int session_sftp(WOLFSSH *ssh, const char *root, int idle_timeout)
 {
     int ret;
     int error;
@@ -407,6 +440,12 @@ int session_sftp(WOLFSSH *ssh, const char *root)
 
         if (error == WS_EOF)
             break;
+        if (error == WS_WANT_READ && idle_timeout > 0) {
+            /* On a blocking socket a timeout is the only way to get WANT_READ, so
+             * this is the idle timeout firing: the client has gone quiet. */
+            printf("sftp: idle for %d s, closing\n", idle_timeout);
+            break;
+        }
         if (error == WS_WANT_READ || error == WS_WANT_WRITE ||
             error == WS_WINDOW_FULL || error == WS_CHAN_RXD ||
             ret == WS_REKEYING)
@@ -488,6 +527,7 @@ static int shell_posix(session_t *s, WOLFSSH *ssh, WOLFSSH_CHANNEL *channel,
     pid_t          pid;
     byte           buf[4096];
     int            done = 0;
+    int            idle_ticks = 0;
 
     ws.ws_col    = (unsigned short)((s->term_set && s->term_w > 0)
                                     ? s->term_w : 80);
@@ -551,8 +591,21 @@ static int shell_posix(session_t *s, WOLFSSH *ssh, WOLFSSH_CHANNEL *channel,
             }
         }
 
-        if (!done && !progressed)
-            shell_sleep_ms(20);
+        if (progressed) {
+            idle_ticks = 0;
+        }
+        else if (!done) {
+            /* The loop wakes every 20 ms when nothing moves, so the idle timeout
+             * needs no clock: the tick count is the elapsed time. */
+            if (s->idle_timeout > 0 &&
+                ++idle_ticks * 20 >= s->idle_timeout * 1000) {
+                printf("shell: idle for %d s, closing\n", s->idle_timeout);
+                done = 1;
+            }
+            else {
+                shell_sleep_ms(20);
+            }
+        }
     }
 
     s->pty_fd = -1;
@@ -651,7 +704,7 @@ static int shell_windows(session_t *s, WOLFSSH *ssh, WOLFSSH_CHANNEL *channel,
     byte                buf[4096];
     DWORD               envLen, written;
     u_long              one = 1;
-    int                 done = 0, i;
+    int                 done = 0, i, idle_ticks = 0;
 
     sa.nLength              = sizeof sa;
     sa.lpSecurityDescriptor = NULL;
@@ -769,8 +822,19 @@ static int shell_windows(session_t *s, WOLFSSH *ssh, WOLFSSH_CHANNEL *channel,
             }
         }
 
-        if (!done && !progressed)
-            shell_sleep_ms(20);
+        if (progressed) {
+            idle_ticks = 0;
+        }
+        else if (!done) {
+            if (s->idle_timeout > 0 &&
+                ++idle_ticks * 20 >= s->idle_timeout * 1000) {
+                printf("shell: idle for %d s, closing\n", s->idle_timeout);
+                done = 1;
+            }
+            else {
+                shell_sleep_ms(20);
+            }
+        }
     }
 
     if (in_w != NULL)
@@ -866,12 +930,14 @@ void session_free(session_t *s)
     free(s);
 }
 
-int session_start(session_t *s, WOLFSSH *ssh, const config_t *cfg)
+int session_start(session_t *s, WOLFSSH *ssh, const config_t *cfg, WS_SOCKET_T fd)
 {
     if (s == NULL)
         return -1;
 
     s->ssh      = ssh;
+    s->fd       = fd;
+    s->idle_timeout = cfg->idle_timeout;
     s->shell    = NULL;
     s->term_w   = 80;
     s->term_h   = 24;

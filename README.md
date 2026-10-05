@@ -112,6 +112,9 @@ without it, the built-in defaults stand.
 | `sftp_root` | *(none)* | starting directory for SFTP; empty disables it |
 | `log_file` | *(none)* | append logs here; empty means the console |
 | `log_level` | `info` | `error`, `warn`, `info`, `debug` |
+| `max_connections` | `32` | concurrent sessions; `0` = unlimited |
+| `login_timeout` | `30` | seconds to authenticate before the connection is dropped; `0` = off |
+| `idle_timeout` | `0` | seconds a shell/SFTP session may sit idle before it ends; `0` = off |
 
 ```ini
 port            = 22
@@ -121,6 +124,9 @@ authorized_keys = C:\Program Files\rossh\authorized_keys
 sftp_root       = C:\Program Files\rossh
 log_file        = C:\Program Files\rossh\rossh.log
 log_level       = info
+max_connections = 32
+login_timeout   = 30
+idle_timeout    = 0
 ```
 
 Precedence is defaults, then the file, then the command line. Unknown keys and

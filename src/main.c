@@ -251,6 +251,44 @@ void server_request_stop(void)
  * piece of mutable state, and it guards itself (src/rng.c).
  */
 
+/* A cap on concurrent sessions. Thread-per-connection without one is a trivial
+ * denial of service: open a TCP connection, stay quiet, and hold a thread (and
+ * its ~33 KB of authorised keys) for as long as you like. */
+#ifdef _WIN32
+static CRITICAL_SECTION g_sessions_lock;
+#define sessions_lock_init() InitializeCriticalSection(&g_sessions_lock)
+#define sessions_lock()      EnterCriticalSection(&g_sessions_lock)
+#define sessions_unlock()    LeaveCriticalSection(&g_sessions_lock)
+#else
+static pthread_mutex_t g_sessions_lock = PTHREAD_MUTEX_INITIALIZER;
+#define sessions_lock_init() ((void)0)
+#define sessions_lock()      pthread_mutex_lock(&g_sessions_lock)
+#define sessions_unlock()    pthread_mutex_unlock(&g_sessions_lock)
+#endif
+
+static int g_sessions;                 /* connections currently in flight */
+
+static int session_slot_acquire(int max)
+{
+    int ok = 0;
+
+    sessions_lock();
+    if (max <= 0 || g_sessions < max) {
+        g_sessions++;
+        ok = 1;
+    }
+    sessions_unlock();
+    return ok;
+}
+
+static void session_slot_release(void)
+{
+    sessions_lock();
+    if (g_sessions > 0)
+        g_sessions--;
+    sessions_unlock();
+}
+
 typedef struct {
     WOLFSSH        *ssh;
     socket_t        fd;
@@ -272,10 +310,15 @@ static void serve_connection(WOLFSSH *ssh, socket_t cfd, const config_t *cfg)
     /* The keys are re-read here, per connection: a key added after the service
      * started (or removed to revoke it) takes effect on the next connection,
      * with no restart. */
-    if (session_start(s, ssh, cfg) != 0)
+    if (session_start(s, ssh, cfg, (WS_SOCKET_T)cfd) != 0)
         log_warn("cannot read authorised keys '%s'", cfg->authorized_keys);
 
     wolfSSH_set_fd(ssh, (WS_SOCKET_T)cfd);
+
+    /* Login grace: a client that connects and then does nothing must not hold
+     * this thread forever. The timeout surfaces as WS_WANT_READ, and the auth
+     * callback lifts it again once a key is accepted. */
+    session_set_io_timeout((WS_SOCKET_T)cfd, cfg->login_timeout);
     rc = wolfSSH_accept(ssh);
     log_debug("wolfSSH_accept -> %d", rc);
 
@@ -284,10 +327,22 @@ static void serve_connection(WOLFSSH *ssh, socket_t cfd, const config_t *cfg)
      * run the version exchange. exec requests were answered by their channel
      * callback. A `shell` request only recorded the channel; the interactive
      * loop runs here, on the socket. */
-    if (rc == WS_SFTP_COMPLETE)
-        session_sftp(ssh, cfg->sftp_root[0] != '\0' ? cfg->sftp_root : NULL);
-    else if (session_shell_requested(s))
-        session_shell(s, (WS_SOCKET_T)cfd);
+    if (rc == WS_SFTP_COMPLETE) {
+        session_sftp(ssh, cfg->sftp_root[0] != '\0' ? cfg->sftp_root : NULL,
+                     cfg->idle_timeout);
+    }
+    else if (rc == WS_SUCCESS) {
+        if (session_shell_requested(s))
+            session_shell(s, (WS_SOCKET_T)cfd);
+    }
+    else if (wolfSSH_get_error(ssh) == WS_WANT_READ) {
+        /* The login grace fired: accept() reports the socket timeout as
+         * WS_FATAL_ERROR with the would-block error left in the session. */
+        log_warn("login timed out after %d s", cfg->login_timeout);
+    }
+    else {
+        log_debug("wolfSSH_accept failed (%d)", rc);
+    }
 
     /* Close the session properly. Without this the socket is dropped as soon as
      * the session ends, and the client sees a connection reset instead of its
@@ -309,6 +364,7 @@ static void connection_worker(void *arg)
     connection_t *c = (connection_t *)arg;
 
     serve_connection(c->ssh, c->fd, c->cfg);
+    session_slot_release();
     free(c);
 }
 
@@ -374,6 +430,7 @@ int server_run(const config_t *cfg, int once)
         return 1;
     }
 
+    sessions_lock_init();
     session_configure(ctx);
     wolfSSH_CTX_SetBanner(ctx, server_banner);
 
@@ -461,8 +518,17 @@ int server_run(const config_t *cfg, int once)
 
         log_info("--- connection from %s", inet_ntoa(peer.sin_addr));
 
+        /* Refuse when at the cap, before allocating anything for the session. */
+        if (!session_slot_acquire(cfg->max_connections)) {
+            log_warn("connection from %s refused: %d sessions already active",
+                     inet_ntoa(peer.sin_addr), cfg->max_connections);
+            close_socket(cfd);
+            continue;
+        }
+
         ssh = wolfSSH_new(ctx);
         if (ssh == NULL) {
+            session_slot_release();
             close_socket(cfd);
             if (once)
                 break;
@@ -473,16 +539,18 @@ int server_run(const config_t *cfg, int once)
             /* --once, what the checks use: serve this one connection inline so
              * the process ends when the session does. */
             serve_connection(ssh, cfd, cfg);
+            session_slot_release();
             break;
         }
 
         /* Otherwise hand it to its own thread, so the accept loop is ready for
          * the next client immediately. If the thread cannot be started, serve
          * it here rather than drop the connection (it just blocks the loop
-         * until it is done). */
+         * until it is done). The thread releases the slot when it finishes. */
         if (spawn_connection(ssh, cfd, cfg) != 0) {
             log_warn("cannot start a thread for the connection, serving it here");
             serve_connection(ssh, cfd, cfg);
+            session_slot_release();
         }
     }
 

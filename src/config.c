@@ -21,7 +21,22 @@ void config_defaults(config_t *cfg)
     copy_str(cfg->bind,     sizeof cfg->bind,     CONFIG_DEFAULT_BIND);
     copy_str(cfg->host_key, sizeof cfg->host_key, CONFIG_DEFAULT_HOST_KEY);
     copy_str(cfg->log_level, sizeof cfg->log_level, "info");
+    cfg->max_connections = CONFIG_DEFAULT_MAX_CONN;
+    cfg->login_timeout   = CONFIG_DEFAULT_LOGIN_TIMEOUT;
+    cfg->idle_timeout    = CONFIG_DEFAULT_IDLE_TIMEOUT;
     /* authorized_keys, sftp_root and log_file default to empty. */
+}
+
+/* Parse a non-negative integer. Returns -1 on anything that is not one, so a
+ * typo in a limit is reported rather than silently becoming 0 (= unlimited). */
+static int parse_count(const char *val)
+{
+    char *end = NULL;
+    long  n = strtol(val, &end, 10);
+
+    if (end == val || *end != '\0' || n < 0 || n > 0x7fffffffL)
+        return -1;
+    return (int)n;
 }
 
 /* Trim leading and trailing whitespace in place; returns the new start. */
@@ -121,6 +136,33 @@ void config_load(config_t *cfg, const char *path)
             copy_str(cfg->log_file, sizeof cfg->log_file, val);
         else if (str_ieq(key, "log_level"))
             copy_str(cfg->log_level, sizeof cfg->log_level, val);
+        else if (str_ieq(key, "max_connections")) {
+            int n = parse_count(val);
+
+            if (n < 0)
+                fprintf(stderr, "rossh: %s:%d: bad max_connections '%s'\n",
+                        path, lineno, val);
+            else
+                cfg->max_connections = n;
+        }
+        else if (str_ieq(key, "login_timeout")) {
+            int n = parse_count(val);
+
+            if (n < 0)
+                fprintf(stderr, "rossh: %s:%d: bad login_timeout '%s'\n",
+                        path, lineno, val);
+            else
+                cfg->login_timeout = n;
+        }
+        else if (str_ieq(key, "idle_timeout")) {
+            int n = parse_count(val);
+
+            if (n < 0)
+                fprintf(stderr, "rossh: %s:%d: bad idle_timeout '%s'\n",
+                        path, lineno, val);
+            else
+                cfg->idle_timeout = n;
+        }
         else
             fprintf(stderr, "rossh: %s:%d: unknown key '%s', skipped\n",
                     path, lineno, key);

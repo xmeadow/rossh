@@ -52,13 +52,20 @@ typedef struct session session_t;
 session_t *session_new(void);
 void       session_free(session_t *s);
 
-/* Attach a freshly accepted connection: remember its WOLFSSH, load the
- * authorised keys from cfg and point the callbacks at this session. */
-int session_start(session_t *s, WOLFSSH *ssh, const config_t *cfg);
+/* Attach a freshly accepted connection: remember its WOLFSSH and socket, load
+ * the authorised keys from cfg and point the callbacks at this session. */
+int session_start(session_t *s, WOLFSSH *ssh, const config_t *cfg,
+                  WS_SOCKET_T fd);
+
+/* Apply (or clear, when `seconds` is <= 0) a receive and send timeout to the
+ * connection socket. A timeout makes wolfSSH report WS_WANT_READ instead of
+ * blocking forever, which is how login grace and idle timeouts are enforced. */
+void session_set_io_timeout(WS_SOCKET_T fd, int seconds);
 
 /* Serves the SFTP subsystem (M3) until the connection ends. `root`, when not
- * NULL, is the jail every path is resolved against. */
-int session_sftp(WOLFSSH *ssh, const char *root);
+ * NULL, is the jail every path is resolved against. `idle_timeout` bounds how
+ * long a silent client may hold the session (0 = no bound). */
+int session_sftp(WOLFSSH *ssh, const char *root, int idle_timeout);
 
 /* True once a `shell` request has arrived on this connection. The request
  * callback only records it; the caller runs the loop once wolfSSH_accept()
